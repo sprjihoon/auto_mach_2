@@ -1,4 +1,9 @@
 {
-  "label_printer": "ALPDF",
-  "a4_printer": "Microsoft Print to PDF"
+  "label_printer": "HPRT SL43",
+  "a4_printer": "Samsung M2070 Series",
+  "bin_settings": {
+    "max_qty_per_bin": 50,
+    "min_qty_threshold": 10,
+    "max_sku_per_shared_bin": 3
+  }
 }

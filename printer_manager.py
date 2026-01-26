@@ -111,7 +111,7 @@ def load_printer_settings() -> Dict[str, Optional[str]]:
 
 def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) -> bool:
     """
-    지정된 프린터로 PDF 출력
+    지정된 프린터로 PDF 출력 (PyMuPDF + win32ui로 직접 출력 - 대화상자 없음)
     
     Args:
         pdf_path: 출력할 PDF 파일 경로
@@ -124,72 +124,103 @@ def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) ->
         print(f"PDF 파일 없음: {pdf_path}")
         return False
     
-    if not HAS_WIN32API:
-        # win32api가 없으면 기본 방법 사용
+    # 프린터 이름이 없으면 기본 프린터 사용
+    if not printer_name and HAS_WIN32API:
         try:
-            import subprocess
-            os.startfile(pdf_path, "print")
-            return True
-        except Exception as e:
-            print(f"PDF 출력 오류: {str(e)}")
-            return False
-    
-    try:
-        # 기본 프린터 백업
-        original_default = None
-        try:
-            original_default = win32print.GetDefaultPrinter()
+            printer_name = win32print.GetDefaultPrinter()
         except Exception:
             pass
-        
-        # 프린터 이름이 지정된 경우 기본 프린터로 임시 설정
-        if printer_name:
-            try:
-                # 프린터 존재 확인
-                printers = get_printers()
-                if printer_name not in printers:
-                    print(f"프린터를 찾을 수 없습니다: {printer_name}")
-                    return False
-                
-                # 기본 프린터로 설정
-                win32print.SetDefaultPrinter(printer_name)
-            except Exception as e:
-                print(f"프린터 설정 오류: {str(e)}")
-                return False
-        
-        # PDF 출력
-        try:
-            win32api.ShellExecute(
-                0,
-                "print",
-                pdf_path,
-                None,
-                ".",
-                0
-            )
-            
-            # 기본 프린터 복원
-            if original_default and printer_name:
-                try:
-                    win32print.SetDefaultPrinter(original_default)
-                except Exception:
-                    pass
-            
-            return True
-        except Exception as e:
-            print(f"PDF 출력 오류: {str(e)}")
-            
-            # 기본 프린터 복원
-            if original_default and printer_name:
-                try:
-                    win32print.SetDefaultPrinter(original_default)
-                except Exception:
-                    pass
-            
+    
+    # 프린터 존재 확인
+    if printer_name and HAS_WIN32API:
+        printers = get_printers()
+        if printer_name not in printers:
+            print(f"프린터를 찾을 수 없습니다: {printer_name}")
             return False
+    
+    # PyMuPDF + win32ui로 직접 출력 (프린터 영역에 정확히 맞춤)
+    try:
+        import fitz  # PyMuPDF
+        from PIL import Image, ImageWin
+        import win32ui
+        import win32con
+        
+        # PDF 열기
+        doc = fitz.open(pdf_path)
+        
+        # 첫 페이지만 출력
+        if len(doc) > 0:
+            page = doc[0]
             
+            # 먼저 프린터 정보 수집
+            hdc = win32ui.CreateDC()
+            hdc.CreatePrinterDC(printer_name)
+            
+            # 프린터 인쇄 가능 영역 (픽셀)
+            printer_width = hdc.GetDeviceCaps(win32con.HORZRES)
+            printer_height = hdc.GetDeviceCaps(win32con.VERTRES)
+            # 프린터 DPI
+            printer_dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX)
+            printer_dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY)
+            
+            print(f"프린터 영역: {printer_width}x{printer_height} 픽셀")
+            print(f"프린터 DPI: {printer_dpi_x}x{printer_dpi_y}")
+            
+            # PDF를 프린터 DPI로 렌더링 (프린터에 맞는 해상도)
+            zoom_x = printer_dpi_x / 72
+            zoom_y = printer_dpi_y / 72
+            mat = fitz.Matrix(zoom_x, zoom_y)
+            pix = page.get_pixmap(matrix=mat)
+            
+            # PIL Image로 변환
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            print(f"렌더링된 이미지: {img.width}x{img.height} 픽셀")
+            
+            # 이미지를 270도 회전
+            img = img.rotate(270, expand=True)
+            
+            # 크롭 (프린터 DPI에 맞게 조정)
+            crop_left = int(5 * printer_dpi_x / 25.4)  # 5mm
+            crop_bottom = int(10 * printer_dpi_y / 25.4)  # 10mm
+            img = img.crop((crop_left, 0, img.width, img.height - crop_bottom))
+            
+            print(f"크롭 후 이미지: {img.width}x{img.height} 픽셀")
+            
+            # 이미지를 프린터 영역에 맞게 스케일링 (비율 유지, 한 장에 맞게)
+            img_ratio = img.width / img.height
+            printer_ratio = printer_width / printer_height
+            
+            if img_ratio > printer_ratio:
+                # 이미지가 더 넓음 - 너비 기준
+                final_width = printer_width
+                final_height = int(printer_width / img_ratio)
+            else:
+                # 이미지가 더 높음 - 높이 기준
+                final_height = printer_height
+                final_width = int(printer_height * img_ratio)
+            
+            print(f"최종 출력 크기: {final_width}x{final_height} 픽셀")
+            
+            # 출력 시작
+            hdc.StartDoc(pdf_path)
+            hdc.StartPage()
+            
+            # 이미지를 프린터 영역에 맞게 그리기 (스케일링은 draw에서 처리)
+            dib = ImageWin.Dib(img)
+            dib.draw(hdc.GetHandleOutput(), (0, 0, final_width, final_height))
+            
+            hdc.EndPage()
+            hdc.EndDoc()
+            hdc.DeleteDC()
+        
+        doc.close()
+        print(f"직접 출력 성공: {pdf_path} → {printer_name}")
+        return True
+        
     except Exception as e:
-        print(f"프린터 출력 오류: {str(e)}")
+        print(f"출력 실패: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
