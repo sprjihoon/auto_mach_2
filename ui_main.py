@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QFileDialog, QGroupBox, QSplitter,
     QHeaderView, QMessageBox, QFrame, QCheckBox, QDialog,
     QScrollArea, QGridLayout, QListWidget, QListWidgetItem,
-    QRadioButton, QButtonGroup, QComboBox, QTabWidget
+    QRadioButton, QButtonGroup, QComboBox, QTabWidget, QSpinBox
 )
 from PySide6.QtCore import Qt, Slot, QTimer, QPropertyAnimation, QEasingCurve, Signal
 from PySide6.QtGui import QFont, QColor, QPalette, QIcon
@@ -182,11 +182,180 @@ from order_processor import OrderProcessor
 from utils import get_timestamp
 from printer_manager import (
     get_printers, save_printer_settings, load_printer_settings,
-    print_pdf_with_printer, check_printer_exists
+    print_pdf_with_printer, check_printer_exists,
+    save_bin_settings, load_bin_settings
 )
 from pdf_search import find_pdf_by_tracking_or_order
 from reprint_pdf_extractor import extract_pages_from_pdf, extract_reprint_page_to_temp
 from bin_manager import BinManager
+
+
+class BinSettingsDialog(QDialog):
+    """BIN 설정 다이얼로그"""
+    
+    def __init__(self, bin_manager, parent=None):
+        super().__init__(parent)
+        self.bin_manager = bin_manager
+        self.setWindowTitle("🗃️ BIN 설정")
+        self.setMinimumSize(450, 350)
+        self._init_ui()
+        self._load_settings()
+    
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        # 헤더
+        header = QLabel("<h3>🗃️ BIN 배정 설정</h3>")
+        header.setAlignment(Qt.AlignCenter)
+        layout.addWidget(header)
+        
+        # 설명
+        desc = QLabel(
+            "BIN 배정 방식을 설정합니다.\n"
+            "• 대량 SKU: 최대수량 초과 시 여러 BIN에 분산\n"
+            "• 소량 SKU: 여러 SKU를 하나의 BIN에 묶음"
+        )
+        desc.setStyleSheet("color: #666; padding: 10px; background: #f5f5f5; border-radius: 5px;")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+        
+        # 설정 그룹
+        settings_group = QGroupBox("BIN 설정")
+        settings_layout = QGridLayout(settings_group)
+        settings_layout.setSpacing(10)
+        
+        # 1. BIN당 최대 수량
+        row = 0
+        settings_layout.addWidget(QLabel("BIN당 최대 수량:"), row, 0)
+        self.max_qty_spin = QSpinBox()
+        self.max_qty_spin.setRange(1, 9999)
+        self.max_qty_spin.setValue(100)
+        self.max_qty_spin.setSuffix(" 개")
+        self.max_qty_spin.setToolTip("하나의 BIN에 담을 수 있는 최대 수량입니다.\n초과 시 다음 BIN으로 분산됩니다.")
+        settings_layout.addWidget(self.max_qty_spin, row, 1)
+        
+        hint1 = QLabel("(초과 시 다음 BIN으로 분산)")
+        hint1.setStyleSheet("color: #888; font-size: 11px;")
+        settings_layout.addWidget(hint1, row, 2)
+        
+        # 2. 최소 수량 임계값
+        row = 1
+        settings_layout.addWidget(QLabel("소량 SKU 기준:"), row, 0)
+        self.min_qty_spin = QSpinBox()
+        self.min_qty_spin.setRange(0, 9999)
+        self.min_qty_spin.setValue(10)
+        self.min_qty_spin.setSuffix(" 개 이하")
+        self.min_qty_spin.setToolTip("이 수량 이하인 SKU는 '소량 SKU'로 분류되어\n다른 소량 SKU들과 함께 공유 BIN에 배정됩니다.")
+        settings_layout.addWidget(self.min_qty_spin, row, 1)
+        
+        hint2 = QLabel("(이하면 공유 BIN 배정)")
+        hint2.setStyleSheet("color: #888; font-size: 11px;")
+        settings_layout.addWidget(hint2, row, 2)
+        
+        # 3. 공유 BIN당 최대 SKU 개수
+        row = 2
+        settings_layout.addWidget(QLabel("공유 BIN 최대 SKU:"), row, 0)
+        self.max_sku_spin = QSpinBox()
+        self.max_sku_spin.setRange(1, 99)
+        self.max_sku_spin.setValue(5)
+        self.max_sku_spin.setSuffix(" 종류")
+        self.max_sku_spin.setToolTip("하나의 공유 BIN에 담을 수 있는 최대 SKU 종류 수입니다.\n초과 시 새로운 공유 BIN이 생성됩니다.")
+        settings_layout.addWidget(self.max_sku_spin, row, 1)
+        
+        hint3 = QLabel("(공유 BIN에 묶을 최대 SKU 수)")
+        hint3.setStyleSheet("color: #888; font-size: 11px;")
+        settings_layout.addWidget(hint3, row, 2)
+        
+        layout.addWidget(settings_group)
+        
+        # 현재 상태 표시
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("padding: 10px; background: #E3F2FD; border-radius: 5px;")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        self._update_status()
+        
+        # 값 변경 시 상태 업데이트
+        self.max_qty_spin.valueChanged.connect(self._update_status)
+        self.min_qty_spin.valueChanged.connect(self._update_status)
+        self.max_sku_spin.valueChanged.connect(self._update_status)
+        
+        # 버튼
+        btn_layout = QHBoxLayout()
+        
+        reset_btn = QPushButton("기본값 복원")
+        reset_btn.clicked.connect(self._reset_to_default)
+        btn_layout.addWidget(reset_btn)
+        
+        btn_layout.addStretch()
+        
+        cancel_btn = QPushButton("취소")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        apply_btn = QPushButton("적용")
+        apply_btn.setStyleSheet("background: #2196F3; color: white; font-weight: bold;")
+        apply_btn.clicked.connect(self._apply_settings)
+        btn_layout.addWidget(apply_btn)
+        
+        layout.addLayout(btn_layout)
+    
+    def _load_settings(self):
+        """설정 로드"""
+        settings = load_bin_settings()
+        self.max_qty_spin.setValue(settings.get("max_qty_per_bin", 100))
+        self.min_qty_spin.setValue(settings.get("min_qty_threshold", 10))
+        self.max_sku_spin.setValue(settings.get("max_sku_per_shared_bin", 5))
+    
+    def _update_status(self):
+        """상태 레이블 업데이트"""
+        max_qty = self.max_qty_spin.value()
+        min_qty = self.min_qty_spin.value()
+        max_sku = self.max_sku_spin.value()
+        
+        status_text = (
+            f"📊 <b>현재 설정 요약</b><br>"
+            f"• 대량 SKU ({min_qty}개 초과): 각각 별도 BIN, {max_qty}개 초과 시 분산<br>"
+            f"• 소량 SKU ({min_qty}개 이하): 최대 {max_sku}종류까지 공유 BIN에 묶음"
+        )
+        self.status_label.setText(status_text)
+    
+    def _reset_to_default(self):
+        """기본값 복원"""
+        self.max_qty_spin.setValue(100)
+        self.min_qty_spin.setValue(10)
+        self.max_sku_spin.setValue(5)
+    
+    def _apply_settings(self):
+        """설정 적용"""
+        max_qty = self.max_qty_spin.value()
+        min_qty = self.min_qty_spin.value()
+        max_sku = self.max_sku_spin.value()
+        
+        # BinManager에 설정 적용
+        self.bin_manager.set_config(
+            max_qty_per_bin=max_qty,
+            min_qty_threshold=min_qty,
+            max_sku_per_shared_bin=max_sku
+        )
+        
+        # 설정 파일에 저장
+        save_bin_settings(
+            max_qty_per_bin=max_qty,
+            min_qty_threshold=min_qty,
+            max_sku_per_shared_bin=max_sku
+        )
+        
+        self.accept()
+    
+    def get_settings(self):
+        """현재 설정 반환"""
+        return {
+            "max_qty_per_bin": self.max_qty_spin.value(),
+            "min_qty_threshold": self.min_qty_spin.value(),
+            "max_sku_per_shared_bin": self.max_sku_spin.value()
+        }
 
 
 class MainWindow(QMainWindow):
@@ -1374,6 +1543,14 @@ class MainWindow(QMainWindow):
         self.a4_test_btn.clicked.connect(self._on_test_a4_printer)
         btn_layout.addWidget(self.a4_test_btn)
         
+        btn_layout.addSpacing(10)
+        
+        # BIN 설정 버튼
+        self.bin_settings_btn = QPushButton("🗃️ BIN 설정")
+        self.bin_settings_btn.setToolTip("BIN 배정 설정 (최대수량, 공유 BIN 등)")
+        self.bin_settings_btn.clicked.connect(self._on_bin_settings)
+        btn_layout.addWidget(self.bin_settings_btn)
+        
         btn_layout.addStretch()
         
         # 저장 경로 설정
@@ -1629,6 +1806,17 @@ class MainWindow(QMainWindow):
             self.status_file.setText(f"파일: {Path(file_path).name}")
             
             # ====== BIN 자동 배정 (엑셀 로드 시) ======
+            # 0) BIN 설정 로드 및 적용
+            bin_settings = load_bin_settings()
+            self.bin_manager.set_config(
+                max_qty_per_bin=bin_settings.get("max_qty_per_bin", 100),
+                min_qty_threshold=bin_settings.get("min_qty_threshold", 10),
+                max_sku_per_shared_bin=bin_settings.get("max_sku_per_shared_bin", 5)
+            )
+            self._add_log(f"[BIN] 설정 적용: 최대수량={bin_settings.get('max_qty_per_bin', 100)}, "
+                         f"소량기준={bin_settings.get('min_qty_threshold', 10)}이하, "
+                         f"공유BIN 최대SKU={bin_settings.get('max_sku_per_shared_bin', 5)}")
+            
             # 1) BIN 전체 리셋
             self.bin_manager.reset()
             self._add_log("[BIN] BIN 정보 리셋 완료")
@@ -1642,11 +1830,20 @@ class MainWindow(QMainWindow):
             # 2) SKU별 BIN 자동 배정
             bin_count = self.bin_manager.assign_bins_from_dataframe(self.excel_loader.df)
             if bin_count > 0:
-                self._add_log(f"<b style='color:#2196F3'>[BIN] SKU별 BIN 자동 배정 완료: {bin_count}개 BIN 생성</b>", html=True)
-                # BIN 배정 상세 로그
+                # 통계 정보 가져오기
+                stats = self.bin_manager.get_statistics()
+                shared_bins = stats.get("shared_bins", 0)
+                dedicated_bins = stats.get("dedicated_bins", 0)
+                
+                self._add_log(f"<b style='color:#2196F3'>[BIN] SKU별 BIN 자동 배정 완료: {bin_count}개 BIN 생성 "
+                             f"(전용: {dedicated_bins}, 공유: {shared_bins})</b>", html=True)
+                
+                # BIN 배정 상세 로그 (확장 정보 포함)
                 sku_bins = self.bin_manager.get_all_sku_bins()
-                for barcode, bin_id, _ in sku_bins[:10]:  # 처음 10개만 로그
-                    self._add_log(f"  → {bin_id}: {barcode}")
+                for item in sku_bins[:10]:  # 처음 10개만 로그
+                    barcode, bin_id, bin_num, sku_qty, is_shared = item
+                    shared_tag = " [공유]" if is_shared else ""
+                    self._add_log(f"  → {bin_id}{shared_tag}: {barcode} (수량: {sku_qty})")
                 if len(sku_bins) > 10:
                     self._add_log(f"  ... 외 {len(sku_bins) - 10}개")
             else:
@@ -1790,8 +1987,10 @@ class MainWindow(QMainWindow):
                 if has_location and 'location' in row and pd.notna(row['location']):
                     location = str(row['location'])
                 
-                # BIN 주소 조회
+                # BIN 주소 조회 (공유 BIN인 경우 ★ 표시)
                 bin_id = self.bin_manager.get_sku_bin(barcode) if has_bin else "BIN 미지정"
+                is_shared = self.bin_manager.is_shared_bin(bin_id) if has_bin else False
+                bin_display = f"{bin_id}★" if is_shared else bin_id
                 
                 key = f"{product_name}|{option_name}"
                 if key not in product_summary:
@@ -1801,7 +2000,7 @@ class MainWindow(QMainWindow):
                         'remaining': 0,
                         'location': location,
                         'barcode': barcode,
-                        'bin_id': bin_id
+                        'bin_id': bin_display
                     }
                 product_summary[key]['remaining'] += remaining
             
@@ -2214,6 +2413,43 @@ class MainWindow(QMainWindow):
             self._add_log(f"A4 프린터 테스트 출력 완료: {printer_name}")
         else:
             QMessageBox.warning(self, "오류", f"A4 프린터 테스트 출력 실패: {printer_name}")
+    
+    def _on_bin_settings(self):
+        """BIN 설정 다이얼로그 열기"""
+        dialog = BinSettingsDialog(self.bin_manager, self)
+        if dialog.exec() == QDialog.Accepted:
+            # 설정이 적용됨 - 엑셀이 로드되어 있으면 BIN 재배정
+            if self.excel_loader.df is not None:
+                self._add_log("[BIN] 설정 변경됨 - BIN 재배정 중...")
+                
+                # 새 설정으로 BIN 재배정
+                bin_count = self.bin_manager.assign_bins_from_dataframe(self.excel_loader.df)
+                if bin_count > 0:
+                    stats = self.bin_manager.get_statistics()
+                    shared_bins = stats.get("shared_bins", 0)
+                    dedicated_bins = stats.get("dedicated_bins", 0)
+                    config = stats.get("config", {})
+                    
+                    self._add_log(f"<b style='color:#2196F3'>[BIN] 재배정 완료: {bin_count}개 BIN "
+                                 f"(전용: {dedicated_bins}, 공유: {shared_bins})</b>", html=True)
+                    self._add_log(f"[BIN] 설정: 최대수량={config.get('max_qty_per_bin', 100)}, "
+                                 f"소량기준={config.get('min_qty_threshold', 10)}이하, "
+                                 f"공유BIN 최대SKU={config.get('max_sku_per_shared_bin', 5)}")
+                    
+                    # 송장별 BIN 매핑 재구축
+                    self.bin_manager.build_order_bin_map(self.excel_loader.df)
+                    
+                    # UI 갱신
+                    self._update_summary_tables()
+                    self._update_current_tracking()
+                
+                QMessageBox.information(self, "완료", 
+                    f"BIN 설정이 적용되었습니다.\n"
+                    f"총 {bin_count}개 BIN이 생성되었습니다.")
+            else:
+                self._add_log("[BIN] 설정 저장됨 (엑셀 로드 시 적용됨)")
+                QMessageBox.information(self, "완료", 
+                    "BIN 설정이 저장되었습니다.\n엑셀 파일을 로드하면 적용됩니다.")
     
     @Slot(str)
     def _on_printer_1_changed(self, printer_name: str):
@@ -2660,6 +2896,8 @@ class MainWindow(QMainWindow):
             item_remaining = max(0, item['qty'] - item['scanned_qty'])
             barcode = str(item['barcode']).strip()
             bin_id = self.bin_manager.get_sku_bin(barcode)
+            is_shared = self.bin_manager.is_shared_bin(bin_id)
+            bin_display = f"{bin_id}★" if is_shared else bin_id
             
             self.detail_table.setItem(row, 0, QTableWidgetItem(str(item['product_name'])))
             self.detail_table.setItem(row, 1, QTableWidgetItem(str(item['option_name'])))
@@ -2668,8 +2906,8 @@ class MainWindow(QMainWindow):
             self.detail_table.setItem(row, 4, QTableWidgetItem(str(item['scanned_qty'])))
             self.detail_table.setItem(row, 5, QTableWidgetItem(str(item_remaining)))
             
-            # BIN 컬럼 추가
-            bin_item = QTableWidgetItem(bin_id)
+            # BIN 컬럼 추가 (공유 BIN은 ★ 표시)
+            bin_item = QTableWidgetItem(bin_display)
             bin_item.setTextAlignment(Qt.AlignCenter)
             # BIN 번호에 따른 배경색
             bg_color, _ = self._get_bin_color(bin_id)

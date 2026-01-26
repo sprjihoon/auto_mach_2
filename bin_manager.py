@@ -1,6 +1,11 @@
 """
 BIN 관리 모듈
 SKU별 BIN 자동 배정 및 송장별 BIN 매핑
+
+기능:
+- BIN당 최대수량 설정 (초과 시 다음 BIN으로 분산)
+- 최소수량 이하 SKU 중복 BIN 배정 (소량 SKU들을 하나의 BIN에 묶기)
+- 중복 BIN 최대 SKU 개수 설정
 """
 from typing import Dict, List, Optional, Tuple
 from PySide6.QtCore import QObject, Signal
@@ -14,21 +19,106 @@ class BinManager(QObject):
     bin_updated = Signal()  # BIN 정보 갱신됨
     bin_reset = Signal()    # BIN 전체 리셋됨
     
+    # 기본 설정값
+    DEFAULT_MAX_QTY_PER_BIN = 100       # BIN당 최대 수량
+    DEFAULT_MIN_QTY_THRESHOLD = 10      # 최소 수량 임계값 (이하면 공유 BIN)
+    DEFAULT_MAX_SKU_PER_SHARED_BIN = 5  # 공유 BIN당 최대 SKU 개수
+    
     def __init__(self):
         super().__init__()
-        # SKU(바코드) → BIN 매핑
-        self._sku_bin_map: Dict[str, str] = {}
+        # SKU(바코드) → BIN 매핑 (단일 BIN 또는 리스트)
+        # 대량 SKU: {"barcode": ["BIN-01", "BIN-02"]} (여러 BIN에 분산)
+        # 소량 SKU: {"barcode": "BIN-05"} (공유 BIN)
+        self._sku_bin_map: Dict[str, str] = {}  # 대표 BIN (첫 번째)
+        self._sku_bin_list: Dict[str, List[str]] = {}  # 전체 BIN 리스트 (분산 시)
+        
         # 송장번호 → BIN 매핑
         self._order_bin_map: Dict[str, str] = {}
+        
+        # BIN → SKU 리스트 (공유 BIN용)
+        self._bin_sku_map: Dict[str, List[str]] = {}
+        
+        # BIN별 수량 추적
+        self._bin_qty_map: Dict[str, int] = {}
+        
         # BIN 카운터
         self._bin_counter: int = 0
+        
         # 초기화 여부
         self._initialized: bool = False
+        
+        # 설정값
+        self._max_qty_per_bin: int = self.DEFAULT_MAX_QTY_PER_BIN
+        self._min_qty_threshold: int = self.DEFAULT_MIN_QTY_THRESHOLD
+        self._max_sku_per_shared_bin: int = self.DEFAULT_MAX_SKU_PER_SHARED_BIN
+        
+        # SKU별 수량 정보 (조회용)
+        self._sku_qty_map: Dict[str, int] = {}
     
     @property
     def is_initialized(self) -> bool:
         """BIN 시스템 초기화 여부"""
         return self._initialized
+    
+    @property
+    def max_qty_per_bin(self) -> int:
+        """BIN당 최대 수량"""
+        return self._max_qty_per_bin
+    
+    @max_qty_per_bin.setter
+    def max_qty_per_bin(self, value: int):
+        """BIN당 최대 수량 설정"""
+        self._max_qty_per_bin = max(1, value)
+    
+    @property
+    def min_qty_threshold(self) -> int:
+        """최소 수량 임계값 (이하면 공유 BIN)"""
+        return self._min_qty_threshold
+    
+    @min_qty_threshold.setter
+    def min_qty_threshold(self, value: int):
+        """최소 수량 임계값 설정"""
+        self._min_qty_threshold = max(0, value)
+    
+    @property
+    def max_sku_per_shared_bin(self) -> int:
+        """공유 BIN당 최대 SKU 개수"""
+        return self._max_sku_per_shared_bin
+    
+    @max_sku_per_shared_bin.setter
+    def max_sku_per_shared_bin(self, value: int):
+        """공유 BIN당 최대 SKU 개수 설정"""
+        self._max_sku_per_shared_bin = max(1, value)
+    
+    def set_config(self, max_qty_per_bin: int = None, min_qty_threshold: int = None, 
+                   max_sku_per_shared_bin: int = None):
+        """
+        BIN 설정 일괄 변경
+        
+        Args:
+            max_qty_per_bin: BIN당 최대 수량 (None이면 유지)
+            min_qty_threshold: 최소 수량 임계값 (None이면 유지)
+            max_sku_per_shared_bin: 공유 BIN당 최대 SKU 개수 (None이면 유지)
+        """
+        if max_qty_per_bin is not None:
+            self._max_qty_per_bin = max(1, max_qty_per_bin)
+        if min_qty_threshold is not None:
+            self._min_qty_threshold = max(0, min_qty_threshold)
+        if max_sku_per_shared_bin is not None:
+            self._max_sku_per_shared_bin = max(1, max_sku_per_shared_bin)
+    
+    def get_config(self) -> Dict[str, int]:
+        """
+        현재 BIN 설정 반환
+        
+        Returns:
+            설정 딕셔너리
+        """
+        return {
+            "max_qty_per_bin": self._max_qty_per_bin,
+            "min_qty_threshold": self._min_qty_threshold,
+            "max_sku_per_shared_bin": self._max_sku_per_shared_bin
+        }
     
     def reset(self):
         """
@@ -37,18 +127,33 @@ class BinManager(QObject):
         - 모든 BIN 정보 초기화
         """
         self._sku_bin_map.clear()
+        self._sku_bin_list.clear()
         self._order_bin_map.clear()
+        self._bin_sku_map.clear()
+        self._bin_qty_map.clear()
+        self._sku_qty_map.clear()
         self._bin_counter = 0
         self._initialized = False
         self.bin_reset.emit()
     
+    def _create_new_bin(self) -> str:
+        """새 BIN 생성"""
+        self._bin_counter += 1
+        bin_id = f"BIN-{self._bin_counter:02d}"
+        self._bin_sku_map[bin_id] = []
+        self._bin_qty_map[bin_id] = 0
+        return bin_id
+    
     def assign_bins_from_dataframe(self, df: pd.DataFrame) -> int:
         """
-        DataFrame에서 SKU별 BIN 자동 배정
+        DataFrame에서 SKU별 BIN 자동 배정 (개선된 알고리즘)
         
         1) SKU별 총 수량 합계 계산
         2) 총 수량 기준 내림차순 정렬
-        3) 정렬 순서대로 BIN-01, BIN-02... 배정
+        3) 대량 SKU (수량 > min_qty_threshold):
+           - max_qty_per_bin 초과 시 여러 BIN에 분산
+        4) 소량 SKU (수량 <= min_qty_threshold):
+           - 공유 BIN에 묶음 (max_sku_per_shared_bin 제한)
         
         Args:
             df: 엑셀 DataFrame (barcode, qty 컬럼 필수)
@@ -75,22 +180,80 @@ class BinManager(QObject):
         # 총 수량 내림차순 정렬
         sku_qty = sku_qty.sort_values('total_qty', ascending=False).reset_index(drop=True)
         
-        # BIN 배정
-        for idx, row in sku_qty.iterrows():
+        # SKU 분류: 대량 vs 소량
+        large_skus = []  # (barcode, qty)
+        small_skus = []  # (barcode, qty)
+        
+        for _, row in sku_qty.iterrows():
             barcode = str(row['barcode']).strip()
+            qty = int(row['total_qty'])
+            
             if barcode and barcode != 'nan':
-                self._bin_counter += 1
-                bin_id = f"BIN-{self._bin_counter:02d}"
-                self._sku_bin_map[barcode] = bin_id
+                self._sku_qty_map[barcode] = qty
+                
+                if qty > self._min_qty_threshold:
+                    large_skus.append((barcode, qty))
+                else:
+                    small_skus.append((barcode, qty))
+        
+        # 1. 대량 SKU 처리 (각각 독립 BIN, 필요시 분산)
+        for barcode, qty in large_skus:
+            bins_for_sku = []
+            remaining_qty = qty
+            
+            while remaining_qty > 0:
+                bin_id = self._create_new_bin()
+                assign_qty = min(remaining_qty, self._max_qty_per_bin)
+                
+                self._bin_sku_map[bin_id].append(barcode)
+                self._bin_qty_map[bin_id] = assign_qty
+                bins_for_sku.append(bin_id)
+                
+                remaining_qty -= assign_qty
+            
+            # 대표 BIN (첫 번째)
+            self._sku_bin_map[barcode] = bins_for_sku[0]
+            # 전체 BIN 리스트
+            self._sku_bin_list[barcode] = bins_for_sku
+        
+        # 2. 소량 SKU 처리 (공유 BIN에 묶기)
+        if small_skus:
+            current_shared_bin = None
+            current_shared_qty = 0
+            current_shared_sku_count = 0
+            
+            for barcode, qty in small_skus:
+                # 새 공유 BIN이 필요한지 확인
+                need_new_bin = (
+                    current_shared_bin is None or
+                    current_shared_sku_count >= self._max_sku_per_shared_bin or
+                    current_shared_qty + qty > self._max_qty_per_bin
+                )
+                
+                if need_new_bin:
+                    # 새 공유 BIN 생성
+                    current_shared_bin = self._create_new_bin()
+                    current_shared_qty = 0
+                    current_shared_sku_count = 0
+                
+                # SKU를 공유 BIN에 추가
+                self._bin_sku_map[current_shared_bin].append(barcode)
+                self._bin_qty_map[current_shared_bin] += qty
+                current_shared_qty += qty
+                current_shared_sku_count += 1
+                
+                # 대표 BIN
+                self._sku_bin_map[barcode] = current_shared_bin
+                self._sku_bin_list[barcode] = [current_shared_bin]
         
         self._initialized = True
         self.bin_updated.emit()
         
-        return len(self._sku_bin_map)
+        return self._bin_counter
     
     def get_sku_bin(self, barcode: str) -> str:
         """
-        SKU(바코드)의 BIN 주소 조회
+        SKU(바코드)의 대표 BIN 주소 조회
         
         Args:
             barcode: 바코드
@@ -103,6 +266,71 @@ class BinManager(QObject):
         
         barcode = str(barcode).strip()
         return self._sku_bin_map.get(barcode, "BIN 미지정")
+    
+    def get_sku_all_bins(self, barcode: str) -> List[str]:
+        """
+        SKU(바코드)의 모든 BIN 주소 조회 (분산 시 여러 개)
+        
+        Args:
+            barcode: 바코드
+        
+        Returns:
+            BIN 주소 리스트 (예: ["BIN-01", "BIN-02"])
+        """
+        if not self._initialized:
+            return []
+        
+        barcode = str(barcode).strip()
+        return self._sku_bin_list.get(barcode, [])
+    
+    def get_bin_skus(self, bin_id: str) -> List[str]:
+        """
+        BIN에 포함된 SKU 목록 조회 (공유 BIN 확인용)
+        
+        Args:
+            bin_id: BIN ID (예: "BIN-01")
+        
+        Returns:
+            바코드 리스트
+        """
+        return self._bin_sku_map.get(bin_id, [])
+    
+    def get_bin_qty(self, bin_id: str) -> int:
+        """
+        BIN의 총 수량 조회
+        
+        Args:
+            bin_id: BIN ID
+        
+        Returns:
+            총 수량
+        """
+        return self._bin_qty_map.get(bin_id, 0)
+    
+    def get_sku_qty(self, barcode: str) -> int:
+        """
+        SKU의 총 수량 조회
+        
+        Args:
+            barcode: 바코드
+        
+        Returns:
+            총 수량
+        """
+        return self._sku_qty_map.get(str(barcode).strip(), 0)
+    
+    def is_shared_bin(self, bin_id: str) -> bool:
+        """
+        공유 BIN인지 확인 (SKU가 2개 이상)
+        
+        Args:
+            bin_id: BIN ID
+        
+        Returns:
+            공유 BIN 여부
+        """
+        skus = self._bin_sku_map.get(bin_id, [])
+        return len(skus) > 1
     
     def build_order_bin_map(self, df: pd.DataFrame):
         """
@@ -153,12 +381,12 @@ class BinManager(QObject):
         tracking_no = str(tracking_no).strip()
         return self._order_bin_map.get(tracking_no, "BIN 미지정")
     
-    def get_all_sku_bins(self) -> List[Tuple[str, str, int]]:
+    def get_all_sku_bins(self) -> List[Tuple[str, str, int, int, bool]]:
         """
-        모든 SKU-BIN 매핑 목록 반환 (정렬용)
+        모든 SKU-BIN 매핑 목록 반환 (정렬용, 확장 정보 포함)
         
         Returns:
-            [(barcode, bin_id, bin_number), ...] 리스트
+            [(barcode, bin_id, bin_number, sku_qty, is_shared), ...] 리스트
         """
         result = []
         for barcode, bin_id in self._sku_bin_map.items():
@@ -167,14 +395,41 @@ class BinManager(QObject):
                 bin_num = int(bin_id.split('-')[1])
             except:
                 bin_num = 999
-            result.append((barcode, bin_id, bin_num))
+            
+            sku_qty = self._sku_qty_map.get(barcode, 0)
+            is_shared = self.is_shared_bin(bin_id)
+            
+            result.append((barcode, bin_id, bin_num, sku_qty, is_shared))
         
         # BIN 번호 오름차순 정렬
         result.sort(key=lambda x: x[2])
         return result
     
+    def get_all_bins_info(self) -> List[Dict]:
+        """
+        모든 BIN 정보 반환
+        
+        Returns:
+            [{"bin_id": "BIN-01", "skus": [...], "qty": 100, "is_shared": False}, ...]
+        """
+        result = []
+        for bin_id in sorted(self._bin_sku_map.keys(), key=lambda x: int(x.split('-')[1])):
+            skus = self._bin_sku_map[bin_id]
+            qty = self._bin_qty_map.get(bin_id, 0)
+            is_shared = len(skus) > 1
+            
+            result.append({
+                "bin_id": bin_id,
+                "skus": skus,
+                "sku_count": len(skus),
+                "qty": qty,
+                "is_shared": is_shared
+            })
+        
+        return result
+    
     def get_sku_bin_map(self) -> Dict[str, str]:
-        """SKU-BIN 매핑 딕셔너리 반환"""
+        """SKU-BIN 매핑 딕셔너리 반환 (대표 BIN)"""
         return self._sku_bin_map.copy()
     
     def get_order_bin_map(self) -> Dict[str, str]:
@@ -183,5 +438,31 @@ class BinManager(QObject):
     
     def get_bin_count(self) -> int:
         """배정된 BIN 개수"""
-        return len(self._sku_bin_map)
-
+        return self._bin_counter
+    
+    def get_shared_bin_count(self) -> int:
+        """공유 BIN 개수"""
+        return sum(1 for bin_id in self._bin_sku_map if len(self._bin_sku_map[bin_id]) > 1)
+    
+    def get_statistics(self) -> Dict:
+        """
+        BIN 통계 정보 반환
+        
+        Returns:
+            통계 딕셔너리
+        """
+        total_bins = self._bin_counter
+        shared_bins = self.get_shared_bin_count()
+        total_skus = len(self._sku_bin_map)
+        
+        # 분산된 SKU 개수 (여러 BIN에 걸쳐 있는 SKU)
+        distributed_skus = sum(1 for bins in self._sku_bin_list.values() if len(bins) > 1)
+        
+        return {
+            "total_bins": total_bins,
+            "shared_bins": shared_bins,
+            "dedicated_bins": total_bins - shared_bins,
+            "total_skus": total_skus,
+            "distributed_skus": distributed_skus,
+            "config": self.get_config()
+        }
