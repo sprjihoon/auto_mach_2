@@ -23,6 +23,7 @@ class BinManager(QObject):
     DEFAULT_MAX_QTY_PER_BIN = 100       # BIN당 최대 수량
     DEFAULT_MIN_QTY_THRESHOLD = 10      # 최소 수량 임계값 (이하면 공유 BIN)
     DEFAULT_MAX_SKU_PER_SHARED_BIN = 5  # 공유 BIN당 최대 SKU 개수
+    DEFAULT_DEDICATED_QTY_THRESHOLD = 0 # 전용 BIN 수량 임계값 (이상이면 중복금지, 0=비활성)
     
     def __init__(self):
         super().__init__()
@@ -51,6 +52,7 @@ class BinManager(QObject):
         self._max_qty_per_bin: int = self.DEFAULT_MAX_QTY_PER_BIN
         self._min_qty_threshold: int = self.DEFAULT_MIN_QTY_THRESHOLD
         self._max_sku_per_shared_bin: int = self.DEFAULT_MAX_SKU_PER_SHARED_BIN
+        self._dedicated_qty_threshold: int = self.DEFAULT_DEDICATED_QTY_THRESHOLD
         
         # SKU별 수량 정보 (조회용)
         self._sku_qty_map: Dict[str, int] = {}
@@ -90,8 +92,18 @@ class BinManager(QObject):
         """공유 BIN당 최대 SKU 개수 설정"""
         self._max_sku_per_shared_bin = max(1, value)
     
+    @property
+    def dedicated_qty_threshold(self) -> int:
+        """전용 BIN 수량 임계값 (이상이면 중복금지, 0=비활성)"""
+        return self._dedicated_qty_threshold
+    
+    @dedicated_qty_threshold.setter
+    def dedicated_qty_threshold(self, value: int):
+        """전용 BIN 수량 임계값 설정"""
+        self._dedicated_qty_threshold = max(0, value)
+    
     def set_config(self, max_qty_per_bin: int = None, min_qty_threshold: int = None, 
-                   max_sku_per_shared_bin: int = None):
+                   max_sku_per_shared_bin: int = None, dedicated_qty_threshold: int = None):
         """
         BIN 설정 일괄 변경
         
@@ -99,6 +111,7 @@ class BinManager(QObject):
             max_qty_per_bin: BIN당 최대 수량 (None이면 유지)
             min_qty_threshold: 최소 수량 임계값 (None이면 유지)
             max_sku_per_shared_bin: 공유 BIN당 최대 SKU 개수 (None이면 유지)
+            dedicated_qty_threshold: 전용 BIN 수량 임계값 (None이면 유지, 0=비활성)
         """
         if max_qty_per_bin is not None:
             self._max_qty_per_bin = max(1, max_qty_per_bin)
@@ -106,6 +119,8 @@ class BinManager(QObject):
             self._min_qty_threshold = max(0, min_qty_threshold)
         if max_sku_per_shared_bin is not None:
             self._max_sku_per_shared_bin = max(1, max_sku_per_shared_bin)
+        if dedicated_qty_threshold is not None:
+            self._dedicated_qty_threshold = max(0, dedicated_qty_threshold)
     
     def get_config(self) -> Dict[str, int]:
         """
@@ -117,7 +132,8 @@ class BinManager(QObject):
         return {
             "max_qty_per_bin": self._max_qty_per_bin,
             "min_qty_threshold": self._min_qty_threshold,
-            "max_sku_per_shared_bin": self._max_sku_per_shared_bin
+            "max_sku_per_shared_bin": self._max_sku_per_shared_bin,
+            "dedicated_qty_threshold": self._dedicated_qty_threshold
         }
     
     def reset(self):
@@ -180,9 +196,10 @@ class BinManager(QObject):
         # 총 수량 내림차순 정렬
         sku_qty = sku_qty.sort_values('total_qty', ascending=False).reset_index(drop=True)
         
-        # SKU 분류: 대량 vs 소량
-        large_skus = []  # (barcode, qty)
-        small_skus = []  # (barcode, qty)
+        # SKU 분류: 대량 vs 소량 vs 전용(중복금지)
+        large_skus = []  # (barcode, qty) - 대량 SKU (전용 BIN)
+        small_skus = []  # (barcode, qty) - 소량 SKU (공유 가능)
+        dedicated_skus = []  # (barcode, qty) - 전용 BIN 강제 (중복금지 룰)
         
         for _, row in sku_qty.iterrows():
             barcode = str(row['barcode']).strip()
@@ -191,10 +208,33 @@ class BinManager(QObject):
             if barcode and barcode != 'nan':
                 self._sku_qty_map[barcode] = qty
                 
-                if qty > self._min_qty_threshold:
+                # 전용 BIN 수량 임계값 체크 (중복금지 룰)
+                if self._dedicated_qty_threshold > 0 and qty >= self._dedicated_qty_threshold:
+                    dedicated_skus.append((barcode, qty))
+                elif qty > self._min_qty_threshold:
                     large_skus.append((barcode, qty))
                 else:
                     small_skus.append((barcode, qty))
+        
+        # 0. 전용 BIN 강제 SKU 처리 (중복금지 룰 - 수량 기준)
+        for barcode, qty in dedicated_skus:
+            bins_for_sku = []
+            remaining_qty = qty
+            
+            while remaining_qty > 0:
+                bin_id = self._create_new_bin()
+                assign_qty = min(remaining_qty, self._max_qty_per_bin)
+                
+                self._bin_sku_map[bin_id].append(barcode)
+                self._bin_qty_map[bin_id] = assign_qty
+                bins_for_sku.append(bin_id)
+                
+                remaining_qty -= assign_qty
+            
+            # 대표 BIN (첫 번째)
+            self._sku_bin_map[barcode] = bins_for_sku[0]
+            # 전체 BIN 리스트
+            self._sku_bin_list[barcode] = bins_for_sku
         
         # 1. 대량 SKU 처리 (각각 독립 BIN, 필요시 분산)
         for barcode, qty in large_skus:

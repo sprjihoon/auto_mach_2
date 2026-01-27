@@ -4,6 +4,7 @@
   "bin_settings": {
     "max_qty_per_bin": 50,
     "min_qty_threshold": 10,
-    "max_sku_per_shared_bin": 3
+    "max_sku_per_shared_bin": 2,
+    "dedicated_qty_threshold": 30
   }
 }

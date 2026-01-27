@@ -267,6 +267,20 @@ class BinSettingsDialog(QDialog):
         hint3.setStyleSheet("color: #888; font-size: 11px;")
         settings_layout.addWidget(hint3, row, 2)
         
+        # 4. 전용 BIN 수량 임계값 (중복금지 룰)
+        row = 3
+        settings_layout.addWidget(QLabel("중복금지 수량:"), row, 0)
+        self.dedicated_qty_spin = QSpinBox()
+        self.dedicated_qty_spin.setRange(0, 9999)
+        self.dedicated_qty_spin.setValue(0)
+        self.dedicated_qty_spin.setSuffix(" 개 이상")
+        self.dedicated_qty_spin.setToolTip("단일 SKU 수량이 이 값 이상이면 전용 BIN 배정 (중복금지)\n0 = 비활성")
+        settings_layout.addWidget(self.dedicated_qty_spin, row, 1)
+        
+        hint4 = QLabel("(이상이면 전용 BIN, 0=비활성)")
+        hint4.setStyleSheet("color: #888; font-size: 11px;")
+        settings_layout.addWidget(hint4, row, 2)
+        
         layout.addWidget(settings_group)
         
         # 현재 상태 표시
@@ -280,6 +294,7 @@ class BinSettingsDialog(QDialog):
         self.max_qty_spin.valueChanged.connect(self._update_status)
         self.min_qty_spin.valueChanged.connect(self._update_status)
         self.max_sku_spin.valueChanged.connect(self._update_status)
+        self.dedicated_qty_spin.valueChanged.connect(self._update_status)
         
         # 버튼
         btn_layout = QHBoxLayout()
@@ -307,15 +322,20 @@ class BinSettingsDialog(QDialog):
         self.max_qty_spin.setValue(settings.get("max_qty_per_bin", 100))
         self.min_qty_spin.setValue(settings.get("min_qty_threshold", 10))
         self.max_sku_spin.setValue(settings.get("max_sku_per_shared_bin", 5))
+        self.dedicated_qty_spin.setValue(settings.get("dedicated_qty_threshold", 0))
     
     def _update_status(self):
         """상태 레이블 업데이트"""
         max_qty = self.max_qty_spin.value()
         min_qty = self.min_qty_spin.value()
         max_sku = self.max_sku_spin.value()
+        dedicated_qty = self.dedicated_qty_spin.value()
+        
+        dedicated_rule = f"• 중복금지: {dedicated_qty}개 이상 SKU는 전용 BIN<br>" if dedicated_qty > 0 else ""
         
         status_text = (
             f"📊 <b>현재 설정 요약</b><br>"
+            f"{dedicated_rule}"
             f"• 대량 SKU ({min_qty}개 초과): 각각 별도 BIN, {max_qty}개 초과 시 분산<br>"
             f"• 소량 SKU ({min_qty}개 이하): 최대 {max_sku}종류까지 공유 BIN에 묶음"
         )
@@ -326,25 +346,29 @@ class BinSettingsDialog(QDialog):
         self.max_qty_spin.setValue(100)
         self.min_qty_spin.setValue(10)
         self.max_sku_spin.setValue(5)
+        self.dedicated_qty_spin.setValue(0)
     
     def _apply_settings(self):
         """설정 적용"""
         max_qty = self.max_qty_spin.value()
         min_qty = self.min_qty_spin.value()
         max_sku = self.max_sku_spin.value()
+        dedicated_qty = self.dedicated_qty_spin.value()
         
         # BinManager에 설정 적용
         self.bin_manager.set_config(
             max_qty_per_bin=max_qty,
             min_qty_threshold=min_qty,
-            max_sku_per_shared_bin=max_sku
+            max_sku_per_shared_bin=max_sku,
+            dedicated_qty_threshold=dedicated_qty
         )
         
         # 설정 파일에 저장
         save_bin_settings(
             max_qty_per_bin=max_qty,
             min_qty_threshold=min_qty,
-            max_sku_per_shared_bin=max_sku
+            max_sku_per_shared_bin=max_sku,
+            dedicated_qty_threshold=dedicated_qty
         )
         
         self.accept()
@@ -354,7 +378,8 @@ class BinSettingsDialog(QDialog):
         return {
             "max_qty_per_bin": self.max_qty_spin.value(),
             "min_qty_threshold": self.min_qty_spin.value(),
-            "max_sku_per_shared_bin": self.max_sku_spin.value()
+            "max_sku_per_shared_bin": self.max_sku_spin.value(),
+            "dedicated_qty_threshold": self.dedicated_qty_spin.value()
         }
 
 
@@ -1811,11 +1836,14 @@ class MainWindow(QMainWindow):
             self.bin_manager.set_config(
                 max_qty_per_bin=bin_settings.get("max_qty_per_bin", 100),
                 min_qty_threshold=bin_settings.get("min_qty_threshold", 10),
-                max_sku_per_shared_bin=bin_settings.get("max_sku_per_shared_bin", 5)
+                max_sku_per_shared_bin=bin_settings.get("max_sku_per_shared_bin", 5),
+                dedicated_qty_threshold=bin_settings.get("dedicated_qty_threshold", 0)
             )
+            dedicated_qty = bin_settings.get("dedicated_qty_threshold", 0)
+            dedicated_log = f", 중복금지={dedicated_qty}개 이상" if dedicated_qty > 0 else ""
             self._add_log(f"[BIN] 설정 적용: 최대수량={bin_settings.get('max_qty_per_bin', 100)}, "
                          f"소량기준={bin_settings.get('min_qty_threshold', 10)}이하, "
-                         f"공유BIN 최대SKU={bin_settings.get('max_sku_per_shared_bin', 5)}")
+                         f"공유BIN 최대SKU={bin_settings.get('max_sku_per_shared_bin', 5)}{dedicated_log}")
             
             # 1) BIN 전체 리셋
             self.bin_manager.reset()

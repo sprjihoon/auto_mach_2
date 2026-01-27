@@ -249,7 +249,7 @@ def check_printer_exists(printer_name: str) -> bool:
 # ============================================================
 
 def save_bin_settings(max_qty_per_bin: int = None, min_qty_threshold: int = None, 
-                      max_sku_per_shared_bin: int = None) -> bool:
+                      max_sku_per_shared_bin: int = None, dedicated_qty_threshold: int = None) -> bool:
     """
     settings.json에 BIN 설정 저장
     
@@ -257,6 +257,7 @@ def save_bin_settings(max_qty_per_bin: int = None, min_qty_threshold: int = None
         max_qty_per_bin: BIN당 최대 수량
         min_qty_threshold: 최소 수량 임계값 (이하면 공유 BIN)
         max_sku_per_shared_bin: 공유 BIN당 최대 SKU 개수
+        dedicated_qty_threshold: 전용 BIN 수량 임계값 (이상이면 중복금지, 0=비활성)
     
     Returns:
         저장 성공 여부
@@ -282,6 +283,8 @@ def save_bin_settings(max_qty_per_bin: int = None, min_qty_threshold: int = None
         settings["bin_settings"]["min_qty_threshold"] = min_qty_threshold
     if max_sku_per_shared_bin is not None:
         settings["bin_settings"]["max_sku_per_shared_bin"] = max_sku_per_shared_bin
+    if dedicated_qty_threshold is not None:
+        settings["bin_settings"]["dedicated_qty_threshold"] = dedicated_qty_threshold
     
     # 저장
     try:
@@ -301,7 +304,8 @@ def load_bin_settings() -> Dict[str, int]:
         {
             "max_qty_per_bin": int (기본값: 100),
             "min_qty_threshold": int (기본값: 10),
-            "max_sku_per_shared_bin": int (기본값: 5)
+            "max_sku_per_shared_bin": int (기본값: 5),
+            "dedicated_qty_threshold": int (기본값: 0, 비활성)
         }
     """
     settings_path = get_settings_path()
@@ -310,7 +314,8 @@ def load_bin_settings() -> Dict[str, int]:
     default_settings = {
         "max_qty_per_bin": 100,
         "min_qty_threshold": 10,
-        "max_sku_per_shared_bin": 5
+        "max_sku_per_shared_bin": 5,
+        "dedicated_qty_threshold": 0
     }
     
     if not settings_path.exists():
@@ -325,7 +330,8 @@ def load_bin_settings() -> Dict[str, int]:
         return {
             "max_qty_per_bin": bin_settings.get("max_qty_per_bin", 100),
             "min_qty_threshold": bin_settings.get("min_qty_threshold", 10),
-            "max_sku_per_shared_bin": bin_settings.get("max_sku_per_shared_bin", 5)
+            "max_sku_per_shared_bin": bin_settings.get("max_sku_per_shared_bin", 5),
+            "dedicated_qty_threshold": bin_settings.get("dedicated_qty_threshold", 0)
         }
     except Exception as e:
         print(f"BIN 설정 로드 오류: {str(e)}")
