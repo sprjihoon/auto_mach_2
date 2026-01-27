@@ -138,80 +138,83 @@ def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) ->
             print(f"프린터를 찾을 수 없습니다: {printer_name}")
             return False
     
-    # PyMuPDF + win32ui로 직접 출력 (프린터 영역에 정확히 맞춤)
+    # PyMuPDF + win32ui로 직접 출력 (1장만 출력되도록 최적화)
     try:
         import fitz  # PyMuPDF
         from PIL import Image, ImageWin
         import win32ui
         import win32con
+        import win32print
+        import ctypes
+        
+        print(f"=== print_pdf_with_printer 호출: {printer_name} ===")
         
         # PDF 열기
         doc = fitz.open(pdf_path)
+        print(f"PDF 페이지 수: {len(doc)}")
         
         # 첫 페이지만 출력
         if len(doc) > 0:
             page = doc[0]
             
-            # 먼저 프린터 정보 수집
+            # 프린터 DEVMODE 가져오기 및 수정
+            printer_handle = win32print.OpenPrinter(printer_name)
+            try:
+                printer_info = win32print.GetPrinter(printer_handle, 2)
+                devmode = printer_info['pDevMode']
+                
+                # 용지 정보 로그
+                print(f"프린터 용지: {devmode.PaperWidth/10 if devmode.PaperWidth else 'N/A'}mm x {devmode.PaperLength/10 if devmode.PaperLength else 'N/A'}mm")
+                
+            finally:
+                win32print.ClosePrinter(printer_handle)
+            
+            # 프린터 DC 생성 (DEVMODE 적용)
             hdc = win32ui.CreateDC()
             hdc.CreatePrinterDC(printer_name)
             
             # 프린터 인쇄 가능 영역 (픽셀)
             printer_width = hdc.GetDeviceCaps(win32con.HORZRES)
             printer_height = hdc.GetDeviceCaps(win32con.VERTRES)
-            # 프린터 DPI
             printer_dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX)
             printer_dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY)
             
-            print(f"프린터 영역: {printer_width}x{printer_height} 픽셀")
-            print(f"프린터 DPI: {printer_dpi_x}x{printer_dpi_y}")
+            print(f"프린터 영역: {printer_width}x{printer_height}, DPI: {printer_dpi_x}x{printer_dpi_y}")
             
-            # PDF를 프린터 DPI로 렌더링 (프린터에 맞는 해상도)
+            # PDF를 프린터 DPI로 렌더링
             zoom_x = printer_dpi_x / 72
             zoom_y = printer_dpi_y / 72
             mat = fitz.Matrix(zoom_x, zoom_y)
             pix = page.get_pixmap(matrix=mat)
             
-            # PIL Image로 변환
+            # PIL Image로 변환 (PDF가 이미 270도 회전되어 있으므로 추가 회전 불필요)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            print(f"렌더링된 이미지: {img.width}x{img.height} 픽셀")
             
-            # 이미지를 270도 회전
-            img = img.rotate(270, expand=True)
+            print(f"이미지: {img.width}x{img.height} → ", end="")
             
-            # 크롭 (프린터 DPI에 맞게 조정)
-            crop_left = int(5 * printer_dpi_x / 25.4)  # 5mm
-            crop_bottom = int(10 * printer_dpi_y / 25.4)  # 10mm
-            img = img.crop((crop_left, 0, img.width, img.height - crop_bottom))
+            # 이미지를 프린터 영역에 맞게 스케일링
+            # 높이를 프린터 높이에 정확히 맞춤 (1장만 출력되도록)
+            scale = min(printer_width / img.width, printer_height / img.height)
+            final_width = int(img.width * scale)
+            final_height = int(img.height * scale)
             
-            print(f"크롭 후 이미지: {img.width}x{img.height} 픽셀")
+            print(f"{final_width}x{final_height} (scale: {scale:.2f})")
             
-            # 이미지를 프린터 영역에 맞게 스케일링 (비율 유지, 한 장에 맞게)
-            img_ratio = img.width / img.height
-            printer_ratio = printer_width / printer_height
+            # 이미지를 최종 크기로 리사이즈
+            img_resized = img.resize((final_width, final_height), Image.LANCZOS)
             
-            if img_ratio > printer_ratio:
-                # 이미지가 더 넓음 - 너비 기준
-                final_width = printer_width
-                final_height = int(printer_width / img_ratio)
-            else:
-                # 이미지가 더 높음 - 높이 기준
-                final_height = printer_height
-                final_width = int(printer_height * img_ratio)
-            
-            print(f"최종 출력 크기: {final_width}x{final_height} 픽셀")
-            
-            # 출력 시작
-            hdc.StartDoc(pdf_path)
+            # 출력
+            hdc.StartDoc("Label")
             hdc.StartPage()
             
-            # 이미지를 프린터 영역에 맞게 그리기 (스케일링은 draw에서 처리)
-            dib = ImageWin.Dib(img)
+            dib = ImageWin.Dib(img_resized)
             dib.draw(hdc.GetHandleOutput(), (0, 0, final_width, final_height))
             
             hdc.EndPage()
             hdc.EndDoc()
             hdc.DeleteDC()
+            
+            print(f"출력 완료")
         
         doc.close()
         print(f"직접 출력 성공: {pdf_path} → {printer_name}")

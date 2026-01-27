@@ -648,32 +648,39 @@ class PDFPrinter(QObject):
             # 모든 페이지를 순회하며 추출
             for page_idx in range(start_page, end_page + 1):
                 page = doc[page_idx]
-                original_rect = page.rect
                 
                 # 내용 영역 추출 (텍스트 블록 기준)
                 clip_rect = self._detect_content_rect(page)
                 if page_idx == start_page:
                     self.print_success.emit(f"클립 영역 (페이지 {page_idx + 1}): {clip_rect}")
                 
-                # 원본 페이지의 회전 정보 확인
-                original_rotation = page.rotation  # 0, 90, 180, 270
+                # 송장 영역 크기 (포인트 단위)
+                clip_width = clip_rect.width
+                clip_height = clip_rect.height
                 
-                # 고해상도 렌더링
+                # 270도 회전 적용 시 가로/세로 교체
+                # 회전 후: 가로 = 원본 세로, 세로 = 원본 가로
+                rotated_width = clip_height
+                rotated_height = clip_width
+                
+                self.print_success.emit(f"📐 송장 크기: {clip_width:.1f}x{clip_height:.1f}pt → 회전 후: {rotated_width:.1f}x{rotated_height:.1f}pt")
+                
+                # 새 페이지 생성 (송장 크기, 회전 후 크기로)
+                new_page = optimized_doc.new_page(width=rotated_width, height=rotated_height)
+                
+                # MediaBox와 CropBox를 동일하게 설정 (핵심!)
+                new_page.set_mediabox(fitz.Rect(0, 0, rotated_width, rotated_height))
+                new_page.set_cropbox(fitz.Rect(0, 0, rotated_width, rotated_height))
+                
+                # 고해상도 렌더링 (원본 영역만)
                 dpi = 300
                 zoom = dpi / 72
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
                 
-                # 새 페이지 생성 (원본 크기 및 방향 유지)
-                # 회전이 90도 또는 270도면 가로/세로 교체
-                if original_rotation in [90, 270]:
-                    new_page = optimized_doc.new_page(width=original_rect.height, height=original_rect.width)
-                else:
-                    new_page = optimized_doc.new_page(width=original_rect.width, height=original_rect.height)
-                
-                # 이미지를 삽입 (원본 방향 유지, 회전 없음)
-                target_rect = fitz.Rect(0, 0, new_page.rect.width, new_page.rect.height)
-                new_page.insert_image(target_rect, pixmap=pix, rotate=0, keep_proportion=True, overlay=True)
+                # 이미지를 새 페이지 전체에 삽입 (270도 회전)
+                target_rect = fitz.Rect(0, 0, rotated_width, rotated_height)
+                new_page.insert_image(target_rect, pixmap=pix, rotate=270, keep_proportion=True, overlay=True)
             
             temp_path = self._temp_dir / f"{clean_tracking_no}.pdf"
             if temp_path.exists():
