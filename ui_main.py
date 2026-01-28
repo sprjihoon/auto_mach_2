@@ -21,10 +21,11 @@ import pandas as pd
 from models import ScanResult, ScanEvent
 from excel_loader import ExcelLoader
 from normalize_pdf import normalize_pdf
-from mode_manager import ModeManager, WorkMode, FullPickState
+from mode_manager import ModeManager, WorkMode, FullPickState, PrePickState
 from device_registry import DeviceRegistry
 from esp32_transport import Esp32Transport
 from full_pick_engine import FullPickEngine
+from pre_pick_engine import PrePickEngine, SlotState
 from work_session import WorkSessionManager, WorkSession
 
 
@@ -627,6 +628,9 @@ class MainWindow(QMainWindow):
             esp32_transport=self.esp32_transport
         )
         
+        # 미리피킹 엔진
+        self.pre_pick_engine = PrePickEngine()
+        
         # 작업 세션 관리자
         self.session_manager = WorkSessionManager()
         
@@ -673,9 +677,13 @@ class MainWindow(QMainWindow):
         self.reprint_tab = self._create_reprint_tab()
         self.tab_widget.addTab(self.reprint_tab, "재출력")
         
-        # 전체피킹 탭 (신규)
+        # 전체피킹 탭
         self.fullpick_tab = self._create_fullpick_tab()
         self.tab_widget.addTab(self.fullpick_tab, "🚀 전체피킹")
+        
+        # 미리피킹 탭 (신규)
+        self.prepick_tab = self._create_prepick_tab()
+        self.tab_widget.addTab(self.prepick_tab, "📦 미리피킹")
         
         main_layout.addWidget(self.tab_widget, 1)
         
@@ -1172,12 +1180,16 @@ class MainWindow(QMainWindow):
         self.fp_bin_table.setColumnCount(4)
         self.fp_bin_table.setHorizontalHeaderLabels(["BIN", "수량", "상태", "완료"])
         self.fp_bin_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.fp_bin_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.fp_bin_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.fp_bin_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.fp_bin_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        self.fp_bin_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.fp_bin_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self.fp_bin_table.setColumnWidth(1, 60)   # 수량
+        self.fp_bin_table.setColumnWidth(2, 60)   # 상태
+        self.fp_bin_table.setColumnWidth(3, 80)   # 완료 버튼
         self.fp_bin_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.fp_bin_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.fp_bin_table.setMinimumHeight(300)
+        self.fp_bin_table.verticalHeader().setDefaultSectionSize(40)  # 행 높이
         bin_layout.addWidget(self.fp_bin_table)
         
         # 수동 완료 버튼
@@ -1236,6 +1248,533 @@ class MainWindow(QMainWindow):
         self._connect_fullpick_signals()
         
         return tab
+    
+    def _create_prepick_tab(self) -> QWidget:
+        """미리피킹 탭 생성"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # ===== 상단: 주문 스캔 영역 =====
+        scan_group = QGroupBox("📦 주문 스캔")
+        scan_layout = QVBoxLayout(scan_group)
+        
+        scan_row = QHBoxLayout()
+        self.pp_order_input = QLineEdit()
+        self.pp_order_input.setPlaceholderText("송장번호 또는 주문번호 스캔/입력")
+        self.pp_order_input.setFont(QFont("Arial", 16))
+        self.pp_order_input.setMinimumHeight(50)
+        self.pp_order_input.returnPressed.connect(self._on_pp_order_scan)
+        scan_row.addWidget(self.pp_order_input)
+        
+        self.pp_scan_btn = QPushButton("스캔")
+        self.pp_scan_btn.setMinimumHeight(50)
+        self.pp_scan_btn.setMinimumWidth(100)
+        self.pp_scan_btn.clicked.connect(self._on_pp_order_scan)
+        scan_row.addWidget(self.pp_scan_btn)
+        
+        scan_layout.addLayout(scan_row)
+        
+        # 상태 표시 및 설정
+        status_row = QHBoxLayout()
+        self.pp_status_label = QLabel("주문 스캔 대기...")
+        self.pp_status_label.setFont(QFont("Arial", 12))
+        self.pp_status_label.setStyleSheet("color: #666;")
+        status_row.addWidget(self.pp_status_label)
+        status_row.addStretch()
+        
+        # 슬롯 개수 설정
+        status_row.addWidget(QLabel("슬롯 사용:"))
+        self.pp_slot_count_combo = QComboBox()
+        self.pp_slot_count_combo.addItem("1개 (슬롯1)", 1)
+        self.pp_slot_count_combo.addItem("2개 (슬롯1~2)", 2)
+        self.pp_slot_count_combo.addItem("3개 (슬롯1~3)", 3)
+        self.pp_slot_count_combo.setCurrentIndex(2)  # 기본값: 3개
+        self.pp_slot_count_combo.currentIndexChanged.connect(self._on_pp_slot_count_changed)
+        self.pp_slot_count_combo.setMinimumWidth(120)
+        status_row.addWidget(self.pp_slot_count_combo)
+        
+        status_row.addWidget(QLabel("  "))  # 구분자
+        
+        # 완료된 슬롯 정리 버튼
+        self.pp_clear_done_btn = QPushButton("완료 슬롯 정리")
+        self.pp_clear_done_btn.clicked.connect(self._on_pp_clear_done_slots)
+        status_row.addWidget(self.pp_clear_done_btn)
+        
+        # 전체 초기화 버튼
+        self.pp_reset_btn = QPushButton("전체 초기화")
+        self.pp_reset_btn.setStyleSheet("background-color: #f44336; color: white;")
+        self.pp_reset_btn.clicked.connect(self._on_pp_reset)
+        status_row.addWidget(self.pp_reset_btn)
+        
+        scan_layout.addLayout(status_row)
+        layout.addWidget(scan_group)
+        
+        # ===== 중앙: 슬롯 영역 (3개) =====
+        slots_layout = QHBoxLayout()
+        
+        self.pp_slot_widgets = {}
+        self.pp_slot_complete_btns = {}
+        self.pp_slot_cancel_btns = {}
+        
+        for slot_id in [1, 2, 3]:
+            slot_widget, complete_btn, cancel_btn = self._create_slot_widget(slot_id)
+            slots_layout.addWidget(slot_widget)
+            self.pp_slot_widgets[slot_id] = slot_widget
+            self.pp_slot_complete_btns[slot_id] = complete_btn
+            self.pp_slot_cancel_btns[slot_id] = cancel_btn
+        
+        # 버튼 클릭 연결 (람다 캡처 문제 방지)
+        self.pp_slot_complete_btns[1].clicked.connect(lambda: self._on_pp_slot_complete(1))
+        self.pp_slot_complete_btns[2].clicked.connect(lambda: self._on_pp_slot_complete(2))
+        self.pp_slot_complete_btns[3].clicked.connect(lambda: self._on_pp_slot_complete(3))
+        self.pp_slot_cancel_btns[1].clicked.connect(lambda: self._on_pp_slot_cancel(1))
+        self.pp_slot_cancel_btns[2].clicked.connect(lambda: self._on_pp_slot_cancel(2))
+        self.pp_slot_cancel_btns[3].clicked.connect(lambda: self._on_pp_slot_cancel(3))
+        
+        layout.addLayout(slots_layout, 1)
+        
+        # ===== 하단: 로그 =====
+        log_group = QGroupBox("📝 로그")
+        log_layout = QVBoxLayout(log_group)
+        
+        self.pp_log = QTextEdit()
+        self.pp_log.setReadOnly(True)
+        self.pp_log.setMaximumHeight(120)
+        self.pp_log.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4; font-family: Consolas;")
+        log_layout.addWidget(self.pp_log)
+        
+        layout.addWidget(log_group)
+        
+        # ===== 시그널 연결 =====
+        self._connect_prepick_signals()
+        
+        return tab
+    
+    # 슬롯별 고유 색상 정의
+    SLOT_COLORS = {
+        1: {"color": "#4CAF50", "bg": "#E8F5E9", "name": "녹색"},    # 녹색
+        2: {"color": "#2196F3", "bg": "#E3F2FD", "name": "파란색"},  # 파란색
+        3: {"color": "#FFC107", "bg": "#FFF8E1", "name": "노란색"},  # 노란색
+    }
+    
+    def _create_slot_widget(self, slot_id: int):
+        """슬롯 위젯 생성 - (slot_group, complete_btn, cancel_btn) 반환"""
+        slot_color = self.SLOT_COLORS.get(slot_id, {"color": "#ccc", "bg": "#fff"})
+        
+        slot_group = QGroupBox(f"슬롯 {slot_id}")
+        slot_group.setMinimumWidth(350)
+        slot_group.setStyleSheet(f"""
+            QGroupBox {{
+                font-size: 16px;
+                font-weight: bold;
+                border: 3px solid {slot_color['color']};
+                border-radius: 10px;
+                margin-top: 10px;
+                padding-top: 15px;
+                background-color: {slot_color['bg']};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 15px;
+                padding: 0 5px;
+                color: {slot_color['color']};
+            }}
+        """)
+        
+        layout = QVBoxLayout(slot_group)
+        layout.setSpacing(10)
+        
+        # 주문번호 표시
+        tracking_label = QLabel("주문: -")
+        tracking_label.setObjectName(f"pp_slot_{slot_id}_tracking")
+        tracking_label.setFont(QFont("Arial", 14, QFont.Bold))
+        tracking_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(tracking_label)
+        
+        # 상태 표시
+        state_label = QLabel("EMPTY")
+        state_label.setObjectName(f"pp_slot_{slot_id}_state")
+        state_label.setFont(QFont("Arial", 11))
+        state_label.setAlignment(Qt.AlignCenter)
+        state_label.setStyleSheet("color: #888; padding: 5px;")
+        layout.addWidget(state_label)
+        
+        # BIN 목록 테이블 (바코드, BIN, 수량)
+        bin_table = QTableWidget()
+        bin_table.setObjectName(f"pp_slot_{slot_id}_table")
+        bin_table.setColumnCount(3)
+        bin_table.setHorizontalHeaderLabels(["바코드", "BIN", "수량"])
+        bin_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        bin_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        bin_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        bin_table.setColumnWidth(1, 80)
+        bin_table.setColumnWidth(2, 60)
+        bin_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        bin_table.setSelectionBehavior(QTableWidget.SelectRows)
+        bin_table.verticalHeader().setDefaultSectionSize(35)
+        bin_table.setMinimumHeight(200)
+        layout.addWidget(bin_table)
+        
+        # 총 수량 표시
+        total_label = QLabel("총 수량: 0개")
+        total_label.setObjectName(f"pp_slot_{slot_id}_total")
+        total_label.setFont(QFont("Arial", 12))
+        total_label.setAlignment(Qt.AlignRight)
+        layout.addWidget(total_label)
+        
+        # 버튼 영역
+        btn_layout = QHBoxLayout()
+        
+        # 완료 버튼
+        complete_btn = QPushButton("✅ 완료")
+        complete_btn.setObjectName(f"pp_slot_{slot_id}_complete")
+        complete_btn.setMinimumHeight(45)
+        complete_btn.setFont(QFont("Arial", 12, QFont.Bold))
+        complete_btn.setEnabled(False)
+        complete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border-radius: 5px;
+            }
+            QPushButton:disabled {
+                background-color: #ccc;
+            }
+            QPushButton:hover:enabled {
+                background-color: #45a049;
+            }
+        """)
+        btn_layout.addWidget(complete_btn)
+        
+        # 취소 버튼
+        cancel_btn = QPushButton("❌ 취소")
+        cancel_btn.setObjectName(f"pp_slot_{slot_id}_cancel")
+        cancel_btn.setMinimumHeight(45)
+        cancel_btn.setEnabled(False)
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                border-radius: 5px;
+            }
+            QPushButton:disabled {
+                background-color: #ccc;
+            }
+        """)
+        btn_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        return slot_group, complete_btn, cancel_btn
+    
+    def _connect_prepick_signals(self):
+        """미리피킹 시그널 연결"""
+        # 미리피킹 엔진 시그널
+        self.pre_pick_engine.order_assigned.connect(self._on_pp_order_assigned)
+        self.pre_pick_engine.order_completed.connect(self._on_pp_order_completed)
+        self.pre_pick_engine.order_not_found.connect(self._on_pp_order_not_found)
+        self.pre_pick_engine.already_picked.connect(self._on_pp_already_picked)
+        self.pre_pick_engine.slots_full.connect(self._on_pp_slots_full)
+        self.pre_pick_engine.slot_state_changed.connect(self._on_pp_slot_state_changed)
+        self.pre_pick_engine.log_message.connect(self._add_pp_log)
+        self.pre_pick_engine.error_occurred.connect(self._on_pp_error)
+    
+    # ===== 미리피킹 UI 이벤트 핸들러 =====
+    
+    def _on_pp_order_scan(self):
+        """주문 스캔 처리"""
+        order_no = self.pp_order_input.text().strip()
+        if not order_no:
+            return
+        
+        # 데이터 소스 설정 확인
+        if self.excel_loader.df is not None:
+            self.pre_pick_engine.set_data_source(self.excel_loader.df, self.bin_manager)
+        
+        # 스캔 처리
+        success, message = self.pre_pick_engine.process_scan(order_no)
+        
+        if success:
+            self.pp_status_label.setText(f"✅ {order_no} 배정 완료")
+            self.pp_status_label.setStyleSheet("color: #4CAF50;")
+        else:
+            self.pp_status_label.setText(f"❌ {message}")
+            self.pp_status_label.setStyleSheet("color: #f44336;")
+        
+        # 입력 필드 초기화
+        self.pp_order_input.clear()
+        self.pp_order_input.setFocus()
+    
+    def _on_pp_order_assigned(self, slot_id: int, tracking_no: str, bin_list: list):
+        """주문 배정 완료"""
+        self._update_pp_slot_ui(slot_id)
+    
+    def _on_pp_order_completed(self, slot_id: int, tracking_no: str):
+        """주문 완료"""
+        self._update_pp_slot_ui(slot_id)
+        self.pp_status_label.setText(f"✅ 슬롯 {slot_id} 완료: {tracking_no}")
+        self.pp_status_label.setStyleSheet("color: #4CAF50;")
+    
+    def _on_pp_order_not_found(self, tracking_no: str):
+        """주문 없음"""
+        self.pp_status_label.setText(f"❌ Order not found: {tracking_no}")
+        self.pp_status_label.setStyleSheet("color: #f44336;")
+    
+    def _on_pp_already_picked(self, tracking_no: str):
+        """이미 피킹 완료"""
+        self.pp_status_label.setText(f"⚠️ Already picked: {tracking_no}")
+        self.pp_status_label.setStyleSheet("color: #FF9800;")
+    
+    def _on_pp_slots_full(self):
+        """슬롯 가득 참"""
+        self.pp_status_label.setText("❌ All slots are busy")
+        self.pp_status_label.setStyleSheet("color: #f44336;")
+    
+    def _on_pp_slot_state_changed(self, slot_id: int, state: SlotState):
+        """슬롯 상태 변경"""
+        self._update_pp_slot_ui(slot_id)
+    
+    def _on_pp_error(self, message: str):
+        """에러 발생"""
+        self.pp_status_label.setText(f"❌ {message}")
+        self.pp_status_label.setStyleSheet("color: #f44336;")
+    
+    def _add_pp_log(self, message: str):
+        """미리피킹 로그 추가"""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.pp_log.append(f"[{timestamp}] {message}")
+    
+    def _update_pp_slot_ui(self, slot_id: int):
+        """슬롯 UI 업데이트"""
+        slot_widget = self.pp_slot_widgets.get(slot_id)
+        if not slot_widget:
+            return
+        
+        slot = self.pre_pick_engine.slot_manager.get_slot(slot_id)
+        
+        # 위젯 찾기
+        tracking_label = slot_widget.findChild(QLabel, f"pp_slot_{slot_id}_tracking")
+        state_label = slot_widget.findChild(QLabel, f"pp_slot_{slot_id}_state")
+        bin_table = slot_widget.findChild(QTableWidget, f"pp_slot_{slot_id}_table")
+        total_label = slot_widget.findChild(QLabel, f"pp_slot_{slot_id}_total")
+        complete_btn = self.pp_slot_complete_btns.get(slot_id)
+        cancel_btn = self.pp_slot_cancel_btns.get(slot_id)
+        
+        if slot is None:
+            # 빈 슬롯
+            tracking_label.setText("주문: -")
+            state_label.setText("EMPTY")
+            state_label.setStyleSheet("color: #888; padding: 5px;")
+            bin_table.setRowCount(0)
+            total_label.setText("총 수량: 0개")
+            complete_btn.setEnabled(False)
+            cancel_btn.setEnabled(False)
+            
+            # 슬롯별 고유 색상 유지 (빈 상태에서도)
+            slot_color = self.SLOT_COLORS.get(slot_id, {"color": "#ccc", "bg": "#fff"})
+            slot_widget.setStyleSheet(f"""
+                QGroupBox {{
+                    font-size: 16px;
+                    font-weight: bold;
+                    border: 3px solid {slot_color['color']};
+                    border-radius: 10px;
+                    margin-top: 10px;
+                    padding-top: 15px;
+                    background-color: {slot_color['bg']};
+                }}
+                QGroupBox::title {{
+                    subcontrol-origin: margin;
+                    left: 15px;
+                    padding: 0 5px;
+                    color: {slot_color['color']};
+                }}
+            """)
+        else:
+            # 주문 정보 표시
+            tracking_label.setText(f"주문: {slot.tracking_no}")
+            
+            # 상태 표시
+            state_text = slot.state.value.upper()
+            state_label.setText(state_text)
+            
+            # 슬롯별 고유 색상 가져오기
+            slot_color = self.SLOT_COLORS.get(slot_id, {"color": "#ccc", "bg": "#fff"})
+            
+            # 상태별 스타일 (상태 라벨만)
+            if slot.state == SlotState.ACTIVE:
+                state_label.setStyleSheet("color: #4CAF50; font-weight: bold; padding: 5px; background-color: #E8F5E9; border-radius: 3px;")
+            elif slot.state == SlotState.WAITING:
+                state_label.setStyleSheet("color: #FF9800; font-weight: bold; padding: 5px; background-color: #FFF3E0; border-radius: 3px;")
+            elif slot.state == SlotState.DONE:
+                state_label.setStyleSheet("color: #9E9E9E; font-weight: bold; padding: 5px; background-color: #EEEEEE; border-radius: 3px;")
+            else:
+                state_label.setStyleSheet("color: #888; padding: 5px;")
+            
+            # 슬롯 고유 색상 유지 (DONE 상태일 때만 연하게)
+            if slot.state == SlotState.DONE:
+                slot_widget.setStyleSheet(f"""
+                    QGroupBox {{
+                        font-size: 16px;
+                        font-weight: bold;
+                        border: 3px solid #ccc;
+                        border-radius: 10px;
+                        margin-top: 10px;
+                        padding-top: 15px;
+                        background-color: #f5f5f5;
+                    }}
+                    QGroupBox::title {{
+                        subcontrol-origin: margin;
+                        left: 15px;
+                        padding: 0 5px;
+                        color: #888;
+                    }}
+                """)
+            else:
+                slot_widget.setStyleSheet(f"""
+                    QGroupBox {{
+                        font-size: 16px;
+                        font-weight: bold;
+                        border: 3px solid {slot_color['color']};
+                        border-radius: 10px;
+                        margin-top: 10px;
+                        padding-top: 15px;
+                        background-color: {slot_color['bg']};
+                    }}
+                    QGroupBox::title {{
+                        subcontrol-origin: margin;
+                        left: 15px;
+                        padding: 0 5px;
+                        color: {slot_color['color']};
+                    }}
+                """)
+            
+            # BIN 테이블 업데이트 (바코드, BIN, 수량)
+            bin_list = slot.bin_list
+            bin_table.setRowCount(len(bin_list))
+            for row, (barcodes, bin_id, qty) in enumerate(bin_list):
+                # 바코드
+                barcode_item = QTableWidgetItem(barcodes)
+                bin_table.setItem(row, 0, barcode_item)
+                # BIN
+                bin_item = QTableWidgetItem(bin_id)
+                bin_item.setTextAlignment(Qt.AlignCenter)
+                bin_table.setItem(row, 1, bin_item)
+                # 수량
+                qty_item = QTableWidgetItem(str(qty))
+                qty_item.setTextAlignment(Qt.AlignCenter)
+                bin_table.setItem(row, 2, qty_item)
+            
+            total_label.setText(f"총 수량: {slot.total_qty}개")
+            
+            # 버튼 활성화
+            complete_btn.setEnabled(slot.state in [SlotState.ACTIVE, SlotState.WAITING])
+            cancel_btn.setEnabled(slot.state != SlotState.DONE)
+    
+    def _update_all_pp_slots(self):
+        """모든 슬롯 UI 업데이트"""
+        for slot_id in [1, 2, 3]:
+            self._update_pp_slot_ui(slot_id)
+    
+    def _on_pp_slot_complete(self, slot_id: int):
+        """슬롯 완료 버튼 클릭 - 슬롯 비우고 중복 방지 목록에 추가"""
+        slot = self.pre_pick_engine.slot_manager.get_slot(slot_id)
+        if slot:
+            tracking_no = slot.tracking_no
+            # 중복 방지 목록에 추가
+            self.pre_pick_engine._completed_orders.add(tracking_no)
+            # 슬롯 비우기
+            self.pre_pick_engine.clear_slot(slot_id)
+            self._update_pp_slot_ui(slot_id)
+            self._add_pp_log(f"[완료] 슬롯 {slot_id}: {tracking_no}")
+            self.pp_status_label.setText(f"✅ 슬롯 {slot_id} 완료: {tracking_no}")
+            self.pp_status_label.setStyleSheet("color: #4CAF50;")
+        else:
+            self._add_pp_log(f"[오류] 슬롯 {slot_id}이 비어있습니다")
+    
+    def _on_pp_slot_cancel(self, slot_id: int):
+        """슬롯 취소 버튼 클릭 - 슬롯만 비움 (다시 스캔 가능)"""
+        slot = self.pre_pick_engine.slot_manager.get_slot(slot_id)
+        if slot:
+            tracking_no = slot.tracking_no
+            # 슬롯만 비우기 (중복 방지 목록에 추가하지 않음)
+            self.pre_pick_engine.clear_slot(slot_id)
+            self._update_pp_slot_ui(slot_id)
+            self._add_pp_log(f"[취소] 슬롯 {slot_id}: {tracking_no}")
+            self.pp_status_label.setText(f"🗑️ 슬롯 {slot_id} 취소: {tracking_no}")
+            self.pp_status_label.setStyleSheet("color: #666;")
+        else:
+            self._add_pp_log(f"[오류] 슬롯 {slot_id}이 비어있습니다")
+    
+    def _on_pp_clear_done_slots(self):
+        """완료된 슬롯 정리"""
+        self.pre_pick_engine.clear_completed_slots()
+        self._update_all_pp_slots()
+        self.pp_status_label.setText("🧹 완료된 슬롯 정리됨")
+        self.pp_status_label.setStyleSheet("color: #666;")
+    
+    def _on_pp_reset(self):
+        """전체 초기화"""
+        reply = QMessageBox.question(
+            self, "초기화 확인",
+            "모든 슬롯을 초기화하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.pre_pick_engine.reset()
+            self._update_all_pp_slots()
+            self.pp_status_label.setText("🔄 전체 초기화됨")
+            self.pp_status_label.setStyleSheet("color: #666;")
+    
+    def _on_pp_slot_count_changed(self, index: int):
+        """슬롯 개수 변경"""
+        slot_count = self.pp_slot_count_combo.itemData(index)
+        
+        # 사용하지 않는 슬롯에 주문이 있는지 확인
+        has_orders = False
+        for slot_id in range(slot_count + 1, 4):
+            slot = self.pre_pick_engine.slot_manager.get_slot(slot_id)
+            if slot is not None:
+                has_orders = True
+                break
+        
+        if has_orders:
+            reply = QMessageBox.question(
+                self, "슬롯 변경 확인",
+                "사용하지 않을 슬롯에 주문이 있습니다.\n해당 슬롯을 비우고 변경하시겠습니까?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                # 이전 값으로 복원
+                self.pp_slot_count_combo.blockSignals(True)
+                current_count = self.pre_pick_engine.slot_manager.active_slot_count
+                self.pp_slot_count_combo.setCurrentIndex(current_count - 1)
+                self.pp_slot_count_combo.blockSignals(False)
+                return
+            
+            # 해당 슬롯 비우기
+            for slot_id in range(slot_count + 1, 4):
+                self.pre_pick_engine.clear_slot(slot_id)
+        
+        # 슬롯 개수 변경
+        self.pre_pick_engine.slot_manager.set_active_slot_count(slot_count)
+        
+        # UI 업데이트 (슬롯 표시/숨김)
+        for slot_id in [1, 2, 3]:
+            widget = self.pp_slot_widgets.get(slot_id)
+            if widget:
+                if slot_id <= slot_count:
+                    widget.setVisible(True)
+                else:
+                    widget.setVisible(False)
+        
+        self._add_pp_log(f"[설정] 슬롯 개수 변경: {slot_count}개")
+        self.pp_status_label.setText(f"슬롯 {slot_count}개 사용")
+        self.pp_status_label.setStyleSheet("color: #666;")
     
     def _connect_fullpick_signals(self):
         """전체피킹 시그널 연결"""
@@ -1391,7 +1930,26 @@ class MainWindow(QMainWindow):
             self.fp_bin_table.setItem(row, 2, status_item)
             
             # 완료 버튼
-            complete_btn = QPushButton("완료")
+            complete_btn = QPushButton("✓ 완료")
+            complete_btn.setMinimumWidth(70)
+            complete_btn.setMinimumHeight(30)
+            complete_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #4CAF50;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    font-weight: bold;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background-color: #45a049;
+                }
+                QPushButton:disabled {
+                    background-color: #cccccc;
+                    color: #666666;
+                }
+            """)
             complete_btn.setProperty("bin_id", bin_id)
             complete_btn.clicked.connect(lambda checked, b=bin_id: self._on_fp_bin_button_clicked(b))
             self.fp_bin_table.setCellWidget(row, 3, complete_btn)
@@ -2619,6 +3177,20 @@ class MainWindow(QMainWindow):
         self.bin_settings_btn.clicked.connect(self._on_bin_settings)
         btn_layout.addWidget(self.bin_settings_btn)
         
+        btn_layout.addSpacing(5)
+        
+        # 송장 회전 설정 콤보박스
+        btn_layout.addWidget(QLabel("회전:"))
+        self.rotation_combo = QComboBox()
+        self.rotation_combo.addItems(["0°", "90°", "180°", "270°"])
+        self.rotation_combo.setMaximumWidth(70)
+        self.rotation_combo.setToolTip("송장 출력 방향 설정")
+        self.rotation_combo.currentIndexChanged.connect(self._on_rotation_change)
+        btn_layout.addWidget(self.rotation_combo)
+        
+        # 회전 설정 로드 및 콤보박스 선택
+        self._update_rotation_combo()
+        
         btn_layout.addStretch()
         
         # 저장 경로 설정
@@ -3633,34 +4205,147 @@ class MainWindow(QMainWindow):
     
     @Slot()
     def _on_test_label_printer(self):
-        """라벨 프린터 테스트 출력"""
+        """라벨 프린터 테스트 출력 (회전 설정 포함)"""
         printer_name = self.label_printer_combo.currentText()
         if not printer_name or printer_name == "프린터 없음":
             QMessageBox.warning(self, "경고", "라벨 프린터를 먼저 선택해주세요.")
             return
         
-        # 테스트 PDF 파일 경로
-        test_pdf_path = Path(__file__).parent / "labels" / "test_label.pdf"
+        # 현재 회전 설정 로드
+        from printer_manager import load_label_rotation
+        rotation = load_label_rotation()
         
-        # 테스트 파일이 없으면 임시 파일 생성
-        if not test_pdf_path.exists():
-            test_pdf_path.parent.mkdir(exist_ok=True)
+        # 테스트 PDF 파일 경로 (회전별로 다른 파일)
+        test_pdf_path = Path(__file__).parent / "labels" / f"test_label_{rotation}.pdf"
+        test_pdf_path.parent.mkdir(exist_ok=True)
+        
+        # 테스트 PDF 생성 (항상 새로 생성 - 회전 설정이 바뀔 수 있으므로)
+        try:
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.pagesizes import landscape
+            from reportlab.lib.units import mm
+            from datetime import datetime
+            
+            # 라벨 크기 (100mm x 70mm 가로형)
+            label_width = 100 * mm
+            label_height = 70 * mm
+            
+            c = canvas.Canvas(str(test_pdf_path), pagesize=(label_width, label_height))
+            
+            # 폰트 설정
             try:
-                from reportlab.pdfgen import canvas
-                from reportlab.lib.pagesizes import letter
-                c = canvas.Canvas(str(test_pdf_path), pagesize=letter)
-                c.drawString(100, 750, "라벨 프린터 테스트")
-                c.drawString(100, 730, f"프린터: {printer_name}")
-                c.save()
-            except ImportError:
-                QMessageBox.warning(self, "경고", "테스트 PDF 생성에 필요한 라이브러리가 없습니다.")
-                return
+                from reportlab.pdfbase import pdfmetrics
+                from reportlab.pdfbase.ttfonts import TTFont
+                # 시스템 폰트 사용 시도
+                import os
+                font_path = os.path.join(os.environ.get('WINDIR', 'C:\\Windows'), 'Fonts', 'malgun.ttf')
+                if os.path.exists(font_path):
+                    pdfmetrics.registerFont(TTFont('Malgun', font_path))
+                    c.setFont('Malgun', 12)
+                else:
+                    c.setFont('Helvetica', 12)
+            except Exception:
+                c.setFont('Helvetica', 12)
+            
+            # 테두리 그리기
+            c.rect(5, 5, label_width - 10, label_height - 10)
+            
+            # 상단 표시 (이 부분이 위로 나와야 정상)
+            c.setFontSize(14)
+            c.drawCentredString(label_width / 2, label_height - 18, "▲ 위 ▲")
+            
+            # 좌측 표시
+            c.saveState()
+            c.translate(18, label_height / 2)
+            c.rotate(90)
+            c.drawCentredString(0, 0, "◀ 좌")
+            c.restoreState()
+            
+            # 우측 표시
+            c.saveState()
+            c.translate(label_width - 18, label_height / 2)
+            c.rotate(-90)
+            c.drawCentredString(0, 0, "우 ▶")
+            c.restoreState()
+            
+            # 중앙 - 회전 테스트 제목
+            c.setFontSize(16)
+            c.drawCentredString(label_width / 2, label_height / 2 + 15, "회전 테스트")
+            
+            # 회전 정보
+            c.setFontSize(12)
+            c.drawCentredString(label_width / 2, label_height / 2 - 5, f"설정: {rotation}°")
+            
+            # 프린터 정보
+            c.setFontSize(9)
+            short_printer = printer_name[:25] + "..." if len(printer_name) > 25 else printer_name
+            c.drawCentredString(label_width / 2, label_height / 2 - 22, short_printer)
+            c.drawCentredString(label_width / 2, label_height / 2 - 35, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            
+            # 하단 표시
+            c.setFontSize(14)
+            c.drawCentredString(label_width / 2, 12, "▼ 아래 ▼")
+            
+            c.save()
+            
+        except ImportError as e:
+            QMessageBox.warning(self, "경고", f"테스트 PDF 생성 실패: {str(e)}")
+            return
         
-        # 출력
-        if print_pdf_with_printer(str(test_pdf_path), printer_name):
-            self._add_log(f"라벨 프린터 테스트 출력 완료: {printer_name}")
-        else:
-            QMessageBox.warning(self, "오류", f"라벨 프린터 테스트 출력 실패: {printer_name}")
+        # PDF 생성 후 회전 적용하여 출력
+        try:
+            import fitz
+            
+            # 원본 PDF 열기
+            doc = fitz.open(str(test_pdf_path))
+            page = doc[0]
+            
+            # 페이지 크기
+            page_rect = page.rect
+            page_width = page_rect.width
+            page_height = page_rect.height
+            
+            # 회전 후 크기 계산
+            if rotation in [90, 270]:
+                rotated_width = page_height
+                rotated_height = page_width
+            else:
+                rotated_width = page_width
+                rotated_height = page_height
+            
+            # 새 문서 생성 (회전 적용)
+            rotated_doc = fitz.open()
+            new_page = rotated_doc.new_page(width=rotated_width, height=rotated_height)
+            
+            # 고해상도 렌더링
+            dpi = 300
+            zoom = dpi / 72
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            
+            # 회전 적용하여 삽입
+            target_rect = fitz.Rect(0, 0, rotated_width, rotated_height)
+            new_page.insert_image(target_rect, pixmap=pix, rotate=rotation, keep_proportion=True, overlay=True)
+            
+            # 회전된 PDF 저장
+            rotated_pdf_path = test_pdf_path.parent / f"test_label_{rotation}_rotated.pdf"
+            rotated_doc.save(str(rotated_pdf_path))
+            rotated_doc.close()
+            doc.close()
+            
+            # 출력
+            if print_pdf_with_printer(str(rotated_pdf_path), printer_name):
+                self._add_log(f"라벨 테스트 출력 완료 (회전: {rotation}°)")
+                self._add_log(f"→ '▲ 위 ▲'가 위쪽이면 정상, 아니면 회전 설정 변경")
+            else:
+                QMessageBox.warning(self, "오류", f"라벨 프린터 테스트 출력 실패: {printer_name}")
+                
+        except ImportError:
+            # PyMuPDF 없으면 원본 그대로 출력
+            if print_pdf_with_printer(str(test_pdf_path), printer_name):
+                self._add_log(f"라벨 테스트 출력 완료 (회전 미적용)")
+            else:
+                QMessageBox.warning(self, "오류", f"라벨 프린터 테스트 출력 실패: {printer_name}")
     
     @Slot()
     def _on_test_a4_printer(self):
@@ -3692,6 +4377,37 @@ class MainWindow(QMainWindow):
             self._add_log(f"A4 프린터 테스트 출력 완료: {printer_name}")
         else:
             QMessageBox.warning(self, "오류", f"A4 프린터 테스트 출력 실패: {printer_name}")
+    
+    @Slot()
+    def _on_rotation_change(self):
+        """송장 회전 설정 변경 (콤보박스 선택)"""
+        from printer_manager import save_label_rotation
+        
+        if not hasattr(self, 'rotation_combo'):
+            return
+        
+        # 콤보박스에서 선택된 값 가져오기 (0°, 90°, 180°, 270°)
+        rotation_text = self.rotation_combo.currentText()
+        rotation_values = {"0°": 0, "90°": 90, "180°": 180, "270°": 270}
+        new_rotation = rotation_values.get(rotation_text, 270)
+        
+        # 저장
+        if save_label_rotation(new_rotation):
+            self._add_log(f"송장 회전 설정 변경: {new_rotation}°")
+        else:
+            QMessageBox.warning(self, "오류", "회전 설정 저장에 실패했습니다.")
+    
+    def _update_rotation_combo(self):
+        """회전 콤보박스 선택값 업데이트"""
+        from printer_manager import load_label_rotation
+        
+        if hasattr(self, 'rotation_combo'):
+            rotation = load_label_rotation()
+            rotation_map = {0: 0, 90: 1, 180: 2, 270: 3}
+            index = rotation_map.get(rotation, 3)  # 기본값 270° (index 3)
+            self.rotation_combo.blockSignals(True)  # 시그널 일시 차단
+            self.rotation_combo.setCurrentIndex(index)
+            self.rotation_combo.blockSignals(False)
     
     def _on_bin_settings(self):
         """BIN 설정 다이얼로그 열기"""

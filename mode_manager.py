@@ -1,8 +1,8 @@
 """
 모드 관리 모듈
-역매칭(REVERSE_MATCHING) / 전체피킹(FULL_PICK) 모드 관리
+역매칭(REVERSE_MATCHING) / 전체피킹(FULL_PICK) / 미리피킹(PRE_PICK) 모드 관리
 
-기존 역매칭 모드는 수정하지 않고, 전체피킹 모드를 별도로 관리
+기존 역매칭 모드는 수정하지 않고, 전체피킹/미리피킹 모드를 별도로 관리
 """
 from enum import Enum
 from typing import Optional, Callable, List
@@ -12,7 +12,8 @@ from PySide6.QtCore import QObject, Signal
 class WorkMode(Enum):
     """작업 모드"""
     REVERSE_MATCHING = "reverse_matching"  # 역매칭 (기존)
-    FULL_PICK = "full_pick"                # 전체피킹 (신규)
+    FULL_PICK = "full_pick"                # 전체피킹
+    PRE_PICK = "pre_pick"                  # 미리피킹 (신규)
 
 
 class FullPickState(Enum):
@@ -24,16 +25,27 @@ class FullPickState(Enum):
     SKU_DONE = "sku_done"            # SKU 피킹 완료
 
 
+class PrePickState(Enum):
+    """미리피킹 상태"""
+    IDLE = "idle"                          # 대기 상태
+    WAIT_ORDER_SCAN = "wait_order_scan"    # 주문(송장) 스캔 대기
+    ORDER_LOADED = "order_loaded"          # 주문 로드됨 (SKU 목록 표시)
+    SKU_PICKING = "sku_picking"            # SKU 피킹 진행중
+    SKU_DONE = "sku_done"                  # 개별 SKU 피킹 완료
+    ORDER_DONE = "order_done"              # 주문 전체 피킹 완료
+
+
 class ModeManager(QObject):
     """
     작업 모드 관리자
     
-    역매칭/전체피킹 모드를 전환하고 상태를 관리
+    역매칭/전체피킹/미리피킹 모드를 전환하고 상태를 관리
     """
     
     # 시그널
-    mode_changed = Signal(object)        # WorkMode
-    state_changed = Signal(object)       # FullPickState (전체피킹 모드용)
+    mode_changed = Signal(object)            # WorkMode
+    state_changed = Signal(object)           # FullPickState (전체피킹 모드용)
+    pre_pick_state_changed = Signal(object)  # PrePickState (미리피킹 모드용)
     
     def __init__(self):
         super().__init__()
@@ -43,6 +55,9 @@ class ModeManager(QObject):
         
         # 전체피킹 상태
         self._full_pick_state: FullPickState = FullPickState.IDLE
+        
+        # 미리피킹 상태
+        self._pre_pick_state: PrePickState = PrePickState.IDLE
         
         # 모드 변경 콜백
         self._on_mode_change_callbacks: List[Callable] = []
@@ -63,9 +78,19 @@ class ModeManager(QObject):
         return self._current_mode == WorkMode.FULL_PICK
     
     @property
+    def is_pre_pick(self) -> bool:
+        """미리피킹 모드인지 확인"""
+        return self._current_mode == WorkMode.PRE_PICK
+    
+    @property
     def full_pick_state(self) -> FullPickState:
         """전체피킹 상태"""
         return self._full_pick_state
+    
+    @property
+    def pre_pick_state(self) -> PrePickState:
+        """미리피킹 상태"""
+        return self._pre_pick_state
     
     def set_mode(self, mode: WorkMode) -> bool:
         """
@@ -90,6 +115,13 @@ class ModeManager(QObject):
         else:
             self._full_pick_state = FullPickState.IDLE
         
+        # 미리피킹 모드로 전환 시 상태 초기화
+        if mode == WorkMode.PRE_PICK:
+            self._pre_pick_state = PrePickState.WAIT_ORDER_SCAN
+            self.pre_pick_state_changed.emit(self._pre_pick_state)
+        else:
+            self._pre_pick_state = PrePickState.IDLE
+        
         # 시그널 발생
         self.mode_changed.emit(mode)
         
@@ -109,6 +141,10 @@ class ModeManager(QObject):
     def switch_to_full_pick(self):
         """전체피킹 모드로 전환"""
         self.set_mode(WorkMode.FULL_PICK)
+    
+    def switch_to_pre_pick(self):
+        """미리피킹 모드로 전환"""
+        self.set_mode(WorkMode.PRE_PICK)
     
     def set_full_pick_state(self, state: FullPickState):
         """
@@ -132,6 +168,28 @@ class ModeManager(QObject):
             self._full_pick_state = FullPickState.WAIT_SKU_SCAN
             self.state_changed.emit(self._full_pick_state)
     
+    def set_pre_pick_state(self, state: PrePickState):
+        """
+        미리피킹 상태 변경
+        
+        Args:
+            state: 새 상태
+        """
+        if self._current_mode != WorkMode.PRE_PICK:
+            return
+        
+        if state == self._pre_pick_state:
+            return
+        
+        self._pre_pick_state = state
+        self.pre_pick_state_changed.emit(state)
+    
+    def reset_pre_pick(self):
+        """미리피킹 상태 초기화"""
+        if self._current_mode == WorkMode.PRE_PICK:
+            self._pre_pick_state = PrePickState.WAIT_ORDER_SCAN
+            self.pre_pick_state_changed.emit(self._pre_pick_state)
+    
     def on_mode_change(self, callback: Callable):
         """
         모드 변경 콜백 등록
@@ -148,6 +206,8 @@ class ModeManager(QObject):
             return "역매칭"
         elif self._current_mode == WorkMode.FULL_PICK:
             return "전체피킹"
+        elif self._current_mode == WorkMode.PRE_PICK:
+            return "미리피킹"
         return "알 수 없음"
     
     def get_state_display_name(self) -> str:
@@ -160,3 +220,15 @@ class ModeManager(QObject):
             FullPickState.SKU_DONE: "SKU 완료"
         }
         return state_names.get(self._full_pick_state, "알 수 없음")
+    
+    def get_pre_pick_state_display_name(self) -> str:
+        """현재 상태 표시명 (미리피킹 모드용)"""
+        state_names = {
+            PrePickState.IDLE: "대기",
+            PrePickState.WAIT_ORDER_SCAN: "주문 스캔 대기",
+            PrePickState.ORDER_LOADED: "주문 로드됨",
+            PrePickState.SKU_PICKING: "피킹 진행중",
+            PrePickState.SKU_DONE: "SKU 완료",
+            PrePickState.ORDER_DONE: "주문 완료"
+        }
+        return state_names.get(self._pre_pick_state, "알 수 없음")
