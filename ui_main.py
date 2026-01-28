@@ -856,17 +856,44 @@ class MainWindow(QMainWindow):
         layout.setSpacing(15)
         layout.setContentsMargins(20, 20, 20, 20)
         
-        # ===== 상단: 모드 및 서버 상태 =====
-        top_layout = QHBoxLayout()
+        # ===== 상단 1행: 작업 차수 및 업체 =====
+        session_layout = QHBoxLayout()
         
-        # 모드 표시
-        mode_group = QGroupBox("🎯 현재 모드")
-        mode_layout = QHBoxLayout(mode_group)
-        self.fp_mode_label = QLabel("전체피킹 (FULL_PICK)")
-        self.fp_mode_label.setFont(QFont("Arial", 14, QFont.Bold))
-        self.fp_mode_label.setStyleSheet("color: #9C27B0;")  # 보라색
-        mode_layout.addWidget(self.fp_mode_label)
-        top_layout.addWidget(mode_group)
+        # 작업 차수 표시
+        session_group = QGroupBox("📋 작업 차수")
+        session_grp_layout = QHBoxLayout(session_group)
+        self.fp_session_label = QLabel("0차 전체피킹")
+        self.fp_session_label.setFont(QFont("Arial", 16, QFont.Bold))
+        self.fp_session_label.setStyleSheet("color: #9C27B0;")  # 보라색
+        session_grp_layout.addWidget(self.fp_session_label)
+        session_layout.addWidget(session_group)
+        
+        # 현재 업체 표시
+        supplier_group = QGroupBox("🏢 현재 업체")
+        supplier_grp_layout = QHBoxLayout(supplier_group)
+        self.fp_supplier_label = QLabel("업체 미선택")
+        self.fp_supplier_label.setFont(QFont("Arial", 14, QFont.Bold))
+        self.fp_supplier_label.setStyleSheet("color: #FF9800;")
+        supplier_grp_layout.addWidget(self.fp_supplier_label)
+        
+        # 업체 변경 버튼
+        self.fp_change_supplier_btn = QPushButton("🔄 업체 변경")
+        self.fp_change_supplier_btn.clicked.connect(self._on_fp_change_supplier)
+        supplier_grp_layout.addWidget(self.fp_change_supplier_btn)
+        session_layout.addWidget(supplier_group)
+        
+        # 데이터 상태
+        data_group = QGroupBox("📦 데이터")
+        data_grp_layout = QHBoxLayout(data_group)
+        self.fp_data_status = QLabel("엑셀 미로드")
+        self.fp_data_status.setFont(QFont("Arial", 11))
+        data_grp_layout.addWidget(self.fp_data_status)
+        session_layout.addWidget(data_group)
+        
+        layout.addLayout(session_layout)
+        
+        # ===== 상단 2행: 서버 상태 =====
+        top_layout = QHBoxLayout()
         
         # ESP32 서버 상태
         server_group = QGroupBox("📡 ESP32 서버")
@@ -886,7 +913,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(server_group)
         
         # 상태
-        state_group = QGroupBox("📊 상태")
+        state_group = QGroupBox("📊 피킹 상태")
         state_layout = QHBoxLayout(state_group)
         self.fp_state_label = QLabel("SKU 스캔 대기")
         self.fp_state_label.setFont(QFont("Arial", 12))
@@ -1302,6 +1329,105 @@ class MainWindow(QMainWindow):
         if bin_item:
             bin_id = bin_item.text()
             self.full_pick_engine.complete_bin(bin_id)
+    
+    @Slot()
+    def _on_fp_change_supplier(self):
+        """전체피킹 탭에서 업체 변경 (출고 탭의 기능 연동)"""
+        # 원본 데이터가 없으면 경고
+        if self.excel_loader._df_original is None:
+            QMessageBox.warning(self, "경고", "먼저 출고 탭에서 엑셀 파일을 불러오세요.")
+            return
+        
+        # 공급처 컬럼이 없으면 경고
+        if not self.excel_loader.has_supplier_column():
+            QMessageBox.information(self, "알림", "엑셀 파일에 공급처(업체) 컬럼이 없습니다.")
+            return
+        
+        # 업체 목록 가져오기
+        supplier_summary = self.excel_loader.get_supplier_summary()
+        
+        if not supplier_summary:
+            QMessageBox.information(self, "알림", "공급처 데이터가 없습니다.")
+            return
+        
+        if len(supplier_summary) <= 1:
+            QMessageBox.information(self, "알림", "변경할 수 있는 다른 업체가 없습니다.")
+            return
+        
+        # 현재 선택된 업체 리스트 가져오기
+        current_suppliers = self.excel_loader.get_current_suppliers() or []
+        
+        # 업체 선택 다이얼로그 표시
+        dialog = SupplierSelectDialog(supplier_summary, self, current_suppliers)
+        if dialog.exec() == QDialog.Accepted:
+            selected_suppliers = dialog.get_selected_suppliers()
+            
+            # 선택 비교
+            if set(selected_suppliers) == set(current_suppliers):
+                self._add_fp_log("[업체] 동일한 업체 선택됨 - 변경 없음")
+                return
+            
+            # ===== BIN 완전 리셋 안내 =====
+            self._add_fp_log(f"━━━ 업체 변경: BIN 완전 리셋 ━━━")
+            
+            # 업체 변경 적용
+            if len(selected_suppliers) == len(supplier_summary):
+                self.excel_loader.filter_by_supplier(None)
+                self._add_fp_log(f"[업체 변경] 전체 {len(selected_suppliers)}개 업체 선택")
+            elif len(selected_suppliers) > 1:
+                self.excel_loader.filter_by_supplier(selected_suppliers)
+                self._add_fp_log(f"[업체 변경] {len(selected_suppliers)}개 업체 선택: {', '.join(selected_suppliers)}")
+            else:
+                self.excel_loader.filter_by_supplier(selected_suppliers[0])
+                self._add_fp_log(f"[업체 변경] '{selected_suppliers[0]}' 선택됨")
+            
+            # BIN 및 작업 차수 재처리 (출고 탭의 로직 호출)
+            file_path = self.excel_path_edit.text().strip()
+            self._process_after_supplier_selection(file_path)
+            
+            # 전체피킹 탭 UI 업데이트
+            self._update_fp_session_info()
+            
+            # 현재 세션 취소
+            if self.full_pick_engine.current_session:
+                self.full_pick_engine.cancel_session()
+                self.fp_bin_table.setRowCount(0)
+            
+            QMessageBox.information(
+                self,
+                "업체 변경 완료",
+                f"업체가 변경되었습니다.\n\n"
+                f"작업 차수: {self._work_session}차 전체피킹\n"
+                f"선택 업체: {self._work_session_supplier}\n"
+                f"주문 건수: {self.excel_loader.get_filtered_order_count()}건\n\n"
+                f"⚠️ BIN이 완전히 초기화되어 새로 배정되었습니다."
+            )
+    
+    def _update_fp_session_info(self):
+        """전체피킹 탭의 작업 차수/업체 정보 업데이트"""
+        # 작업 차수
+        if self._work_session > 0:
+            self.fp_session_label.setText(f"{self._work_session}차 전체피킹")
+        else:
+            self.fp_session_label.setText("0차 전체피킹")
+        
+        # 현재 업체
+        if self._work_session_supplier:
+            self.fp_supplier_label.setText(self._work_session_supplier)
+        else:
+            supplier = self.excel_loader.get_current_supplier()
+            if supplier:
+                self.fp_supplier_label.setText(supplier)
+            else:
+                self.fp_supplier_label.setText("업체 미선택")
+        
+        # 데이터 상태
+        if self.excel_loader.df is not None:
+            order_count = self.excel_loader.get_filtered_order_count()
+            sku_count = len(self.excel_loader.df['barcode'].unique()) if 'barcode' in self.excel_loader.df.columns else 0
+            self.fp_data_status.setText(f"{order_count}건, {sku_count} SKU")
+        else:
+            self.fp_data_status.setText("엑셀 미로드")
     
     @Slot()
     def _on_reprint_search(self):
@@ -2398,12 +2524,22 @@ class MainWindow(QMainWindow):
         self.pdf_printer.print_success.connect(self._add_log)
         self.pdf_printer.print_error.connect(self._on_error)
         self.pdf_printer.index_updated.connect(self._on_pdf_indexed)
+        
+        # 탭 전환 시그널 - 전체피킹 탭 정보 업데이트
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
     
     @Slot(int)
     def _on_pdf_indexed(self, count: int):
         """PDF 인덱싱 완료"""
         if count > 0:
             self._add_log(f"PDF 인덱스: {count}개 송장번호")
+    
+    @Slot(int)
+    def _on_tab_changed(self, index: int):
+        """탭 전환 이벤트"""
+        # 전체피킹 탭(인덱스 2)으로 전환 시 정보 업데이트
+        if index == 2:  # 전체피킹 탭
+            self._update_fp_session_info()
         
         # Processor 시그널
         self.processor.scan_processed.connect(self._on_scan_processed)
@@ -2707,21 +2843,17 @@ class MainWindow(QMainWindow):
             # BIN 완전 리셋 후 재배정 (새 업체의 SKU에 맞게 BIN-01부터 다시 시작)
             self._process_after_supplier_selection(file_path)
             
-            QMessageBox.information(
-                self,
-                "업체 변경 완료",
-                f"업체가 변경되었습니다.\n\n"
-                f"선택 업체: {', '.join(selected_suppliers) if len(selected_suppliers) <= 3 else f'{len(selected_suppliers)}개 업체'}\n"
-                f"주문 건수: {self.excel_loader.get_filtered_order_count()}건\n\n"
-                f"⚠️ BIN이 완전히 초기화되어 새로 배정되었습니다."
-            )
+            # 전체피킹 탭 정보도 업데이트
+            self._update_fp_session_info()
             
             QMessageBox.information(
                 self,
                 "업체 변경 완료",
                 f"업체가 변경되었습니다.\n\n"
-                f"선택 업체: {selected}\n"
-                f"주문 건수: {self.excel_loader.get_filtered_order_count()}건"
+                f"작업 차수: {self._work_session}차\n"
+                f"선택 업체: {', '.join(selected_suppliers) if len(selected_suppliers) <= 3 else f'{len(selected_suppliers)}개 업체'}\n"
+                f"주문 건수: {self.excel_loader.get_filtered_order_count()}건\n\n"
+                f"⚠️ BIN이 완전히 초기화되어 새로 배정되었습니다."
             )
     
     @Slot()
