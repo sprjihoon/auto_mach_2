@@ -41,3 +41,11 @@ Thumbs.db
 labels/
 *.spec
 
+# PC-specific files (should not be shared)
+work_sessions.json
+settings.json
+orders/
+
+# PDF output files (generated at runtime)
+피킹리스트_*.pdf
+

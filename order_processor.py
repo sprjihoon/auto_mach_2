@@ -5,7 +5,6 @@ qty/scanned_qty 처리, 우선순위 정렬 로직
 from typing import Optional, Tuple
 from PySide6.QtCore import QObject, Signal
 import pandas as pd
-import winsound
 import threading
 
 from models import ScanResult, ScanEvent
@@ -14,27 +13,50 @@ from ezauto_input import EzAutoInput
 from pdf_printer import PDFPrinter
 from utils import get_timestamp, sanitize_barcode
 
+# winsound는 Windows 전용
+try:
+    import winsound
+    HAS_WINSOUND = True
+except ImportError:
+    HAS_WINSOUND = False
+    print("[order_processor] winsound를 사용할 수 없습니다 (Windows 전용)")
+
 
 def play_scan_sound():
     """스캔 성공 신호음 (짧은 비프)"""
+    if not HAS_WINSOUND:
+        return
     def _play():
-        winsound.Beep(1000, 100)  # 1000Hz, 100ms
+        try:
+            winsound.Beep(1000, 100)  # 1000Hz, 100ms
+        except Exception:
+            pass
     threading.Thread(target=_play, daemon=True).start()
 
 
 def play_complete_sound():
     """송장 완료 신호음 (멜로디)"""
+    if not HAS_WINSOUND:
+        return
     def _play():
-        winsound.Beep(800, 150)   # 낮은 음
-        winsound.Beep(1000, 150)  # 중간 음
-        winsound.Beep(1200, 200)  # 높은 음
+        try:
+            winsound.Beep(800, 150)   # 낮은 음
+            winsound.Beep(1000, 150)  # 중간 음
+            winsound.Beep(1200, 200)  # 높은 음
+        except Exception:
+            pass
     threading.Thread(target=_play, daemon=True).start()
 
 
 def play_error_sound():
     """오류 신호음"""
+    if not HAS_WINSOUND:
+        return
     def _play():
-        winsound.Beep(300, 300)  # 낮은 음, 긴 소리
+        try:
+            winsound.Beep(300, 300)  # 낮은 음, 긴 소리
+        except Exception:
+            pass
     threading.Thread(target=_play, daemon=True).start()
 
 

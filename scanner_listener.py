@@ -5,7 +5,19 @@ keyboard 모듈을 사용하여 글로벌 키보드 입력 감지
 import threading
 from typing import Callable, Optional
 from PySide6.QtCore import QObject, Signal
-import keyboard
+
+# keyboard 모듈 (Windows에서 관리자 권한 필요할 수 있음)
+try:
+    import keyboard
+    HAS_KEYBOARD = True
+except ImportError:
+    HAS_KEYBOARD = False
+    keyboard = None
+    print("[scanner_listener] keyboard 패키지가 설치되지 않았습니다. pip install keyboard")
+except Exception as e:
+    HAS_KEYBOARD = False
+    keyboard = None
+    print(f"[scanner_listener] keyboard 모듈 로드 오류: {e}")
 
 
 class ScannerListener(QObject):
@@ -35,6 +47,13 @@ class ScannerListener(QObject):
     
     def start(self) -> bool:
         """스캐너 리스닝 시작"""
+        if not HAS_KEYBOARD:
+            self.status_changed.emit(
+                "⚠️ keyboard 모듈이 설치되지 않아 바코드 스캐너를 사용할 수 없습니다.\n"
+                "설치: pip install keyboard"
+            )
+            return False
+        
         if self._is_running:
             return True
         
@@ -45,12 +64,39 @@ class ScannerListener(QObject):
             # 키보드 훅 등록
             keyboard.on_press(self._on_key_press)
             
-            self.status_changed.emit("스캐너 리스닝 시작됨")
+            self.status_changed.emit("✓ 스캐너 리스닝 시작됨")
             return True
+            
+        except PermissionError:
+            self._is_running = False
+            self.status_changed.emit(
+                "⚠️ 스캐너 시작 실패: 관리자 권한이 필요합니다.\n"
+                "해결방법: 프로그램을 관리자 권한으로 실행하세요.\n"
+                "(프로그램 아이콘 우클릭 → 관리자 권한으로 실행)"
+            )
+            return False
+            
+        except OSError as e:
+            self._is_running = False
+            if "access" in str(e).lower() or "permission" in str(e).lower():
+                self.status_changed.emit(
+                    "⚠️ 스캐너 접근 권한이 없습니다.\n"
+                    "해결방법: 프로그램을 관리자 권한으로 실행하세요."
+                )
+            else:
+                self.status_changed.emit(f"⚠️ 스캐너 시스템 오류: {str(e)}")
+            return False
             
         except Exception as e:
             self._is_running = False
-            self.status_changed.emit(f"스캐너 시작 실패: {str(e)}")
+            error_msg = str(e)
+            if "hook" in error_msg.lower():
+                self.status_changed.emit(
+                    "⚠️ 키보드 훅 등록 실패.\n"
+                    "다른 프로그램이 키보드를 점유하고 있을 수 있습니다."
+                )
+            else:
+                self.status_changed.emit(f"⚠️ 스캐너 시작 실패: {error_msg}")
             return False
     
     def stop(self):
@@ -61,14 +107,15 @@ class ScannerListener(QObject):
         try:
             # unhook_all은 다른 모듈의 훅도 제거할 수 있으므로 주의 필요
             # keyboard 모듈이 초기화되지 않았을 경우 예외 발생 가능
-            try:
-                keyboard.unhook_all()
-            except AttributeError:
-                # keyboard 모듈이 이미 정리된 경우 무시
-                pass
-            except Exception:
-                # 기타 예외도 무시 (프로그램 종료 시 발생 가능)
-                pass
+            if HAS_KEYBOARD and keyboard is not None:
+                try:
+                    keyboard.unhook_all()
+                except AttributeError:
+                    # keyboard 모듈이 이미 정리된 경우 무시
+                    pass
+                except Exception:
+                    # 기타 예외도 무시 (프로그램 종료 시 발생 가능)
+                    pass
             
             self._is_running = False
             with self._lock:
@@ -83,7 +130,7 @@ class ScannerListener(QObject):
                 # Qt 객체가 이미 삭제된 경우 (프로그램 종료 시)
                 pass
     
-    def _on_key_press(self, event: keyboard.KeyboardEvent):
+    def _on_key_press(self, event):
         """키 입력 이벤트 핸들러 (스캐너 입력 속도 필터링)"""
         if not self._is_running or self._is_paused:
             return

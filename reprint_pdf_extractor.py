@@ -13,6 +13,13 @@ try:
 except ImportError:
     PDF_SUPPORT = False
 
+# 회전 설정 로드
+try:
+    from printer_manager import load_label_rotation
+except ImportError:
+    def load_label_rotation():
+        return 270  # 기본값
+
 
 def extract_reprint_page_to_temp(
     pdf_path: Path,
@@ -98,20 +105,33 @@ def extract_reprint_page_to_temp(
         
         optimized_doc = fitz.open()
         
+        # 회전 설정 로드
+        label_rotation = load_label_rotation()
+        print(f"{prefix}회전 설정: {label_rotation}도")
+        
         for page_idx in range(start_page, end_page + 1):
             page = doc[page_idx]
             original_rect = page.rect
             original_rotation = page.rotation
             
-            # 송장(라벨)은 크롭, 주문서는 원본 전체 사용
+            # 송장(라벨)은 크롭 + 회전, 주문서는 원본 전체 사용
             if is_order_sheet:
                 # 주문서: 크롭 없이 전체 페이지 사용
                 dpi = 300
                 zoom = dpi / 72
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat, alpha=False)  # clip 파라미터 없음 (전체 페이지)
+                
+                # 주문서는 원본 크기 유지
+                if original_rotation in [90, 270]:
+                    new_page = optimized_doc.new_page(width=original_rect.height, height=original_rect.width)
+                else:
+                    new_page = optimized_doc.new_page(width=original_rect.width, height=original_rect.height)
+                
+                target_rect = fitz.Rect(0, 0, new_page.rect.width, new_page.rect.height)
+                new_page.insert_image(target_rect, pixmap=pix, rotate=0, keep_proportion=True, overlay=True)
             else:
-                # 송장(라벨): 내용 영역만 크롭
+                # 송장(라벨): 내용 영역만 크롭 + 회전 적용 (pdf_printer.py와 동일)
                 # 내용 영역 감지 (텍스트 블록 기준)
                 try:
                     blocks = page.get_text("blocks") or []
@@ -137,19 +157,38 @@ def extract_reprint_page_to_temp(
                 except Exception:
                     clip_rect = original_rect
                 
+                # 송장 영역 크기 (포인트 단위)
+                clip_width = clip_rect.width
+                clip_height = clip_rect.height
+                
+                # 회전 설정에 따른 크기 계산
+                if label_rotation in [90, 270]:
+                    # 90도 또는 270도 회전 시 가로/세로 교체
+                    rotated_width = clip_height
+                    rotated_height = clip_width
+                else:
+                    # 0도 또는 180도 회전 시 원본 크기 유지
+                    rotated_width = clip_width
+                    rotated_height = clip_height
+                
+                print(f"{prefix}📐 송장 크기: {clip_width:.1f}x{clip_height:.1f}pt → 회전 후: {rotated_width:.1f}x{rotated_height:.1f}pt")
+                
+                # 새 페이지 생성 (회전 후 크기로)
+                new_page = optimized_doc.new_page(width=rotated_width, height=rotated_height)
+                
+                # MediaBox와 CropBox를 동일하게 설정
+                new_page.set_mediabox(fitz.Rect(0, 0, rotated_width, rotated_height))
+                new_page.set_cropbox(fitz.Rect(0, 0, rotated_width, rotated_height))
+                
+                # 고해상도 렌더링 (크롭 적용)
                 dpi = 300
                 zoom = dpi / 72
                 mat = fitz.Matrix(zoom, zoom)
-                pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)  # 크롭 적용
-            
-            # 새 페이지 생성 (원본 크기 및 방향 유지)
-            if original_rotation in [90, 270]:
-                new_page = optimized_doc.new_page(width=original_rect.height, height=original_rect.width)
-            else:
-                new_page = optimized_doc.new_page(width=original_rect.width, height=original_rect.height)
-            
-            target_rect = fitz.Rect(0, 0, new_page.rect.width, new_page.rect.height)
-            new_page.insert_image(target_rect, pixmap=pix, rotate=0, keep_proportion=True, overlay=True)
+                pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
+                
+                # 이미지를 새 페이지에 삽입 (설정된 회전 적용)
+                target_rect = fitz.Rect(0, 0, rotated_width, rotated_height)
+                new_page.insert_image(target_rect, pixmap=pix, rotate=label_rotation, keep_proportion=True, overlay=True)
         
         temp_filename = f"{clean_tracking_no}_reprint_{'order' if is_order_sheet else 'label'}.pdf"
         temp_dir = Path(tempfile.gettempdir()) / "auto_mach_reprint_temp"

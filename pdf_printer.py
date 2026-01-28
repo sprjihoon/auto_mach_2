@@ -11,15 +11,32 @@ from typing import Optional, Dict, List, Tuple
 from PySide6.QtCore import QObject, Signal
 
 from utils import get_pdf_path, pdf_exists
-from printer_manager import print_pdf_with_printer, load_printer_settings
+from printer_manager import print_pdf_with_printer, load_printer_settings, load_label_rotation
 
 # PDF 처리 라이브러리 (고정밀 인식을 위해 여러 라이브러리 사용)
+PDF_SUPPORT = False
+HAS_PDFPLUMBER = False
+HAS_FITZ = False
+
 try:
     import pdfplumber
-    import fitz  # PyMuPDF
-    PDF_SUPPORT = True
+    HAS_PDFPLUMBER = True
 except ImportError:
-    PDF_SUPPORT = False
+    print("[pdf_printer] pdfplumber 패키지가 설치되지 않았습니다. pip install pdfplumber")
+
+try:
+    import fitz  # PyMuPDF
+    HAS_FITZ = True
+except ImportError:
+    print("[pdf_printer] PyMuPDF 패키지가 설치되지 않았습니다. pip install PyMuPDF")
+
+# 둘 다 있어야 PDF_SUPPORT = True
+if HAS_PDFPLUMBER and HAS_FITZ:
+    PDF_SUPPORT = True
+elif HAS_FITZ:
+    # PyMuPDF만 있어도 기본 기능은 동작
+    PDF_SUPPORT = True
+    print("[pdf_printer] pdfplumber 없이 PyMuPDF만 사용합니다 (일부 기능 제한)")
 
 
 class PDFPrinter(QObject):
@@ -643,6 +660,10 @@ class PDFPrinter(QObject):
             
             optimized_doc = fitz.open()
             
+            # 회전 설정 로드
+            label_rotation = load_label_rotation()
+            self.print_success.emit(f"회전 설정: {label_rotation}도")
+            
             # 모든 페이지를 순회하며 추출
             for page_idx in range(start_page, end_page + 1):
                 page = doc[page_idx]
@@ -656,10 +677,15 @@ class PDFPrinter(QObject):
                 clip_width = clip_rect.width
                 clip_height = clip_rect.height
                 
-                # 270도 회전 적용 시 가로/세로 교체
-                # 회전 후: 가로 = 원본 세로, 세로 = 원본 가로
-                rotated_width = clip_height
-                rotated_height = clip_width
+                # 회전 설정에 따른 크기 계산
+                if label_rotation in [90, 270]:
+                    # 90도 또는 270도 회전 시 가로/세로 교체
+                    rotated_width = clip_height
+                    rotated_height = clip_width
+                else:
+                    # 0도 또는 180도 회전 시 원본 크기 유지
+                    rotated_width = clip_width
+                    rotated_height = clip_height
                 
                 self.print_success.emit(f"📐 송장 크기: {clip_width:.1f}x{clip_height:.1f}pt → 회전 후: {rotated_width:.1f}x{rotated_height:.1f}pt")
                 
@@ -676,9 +702,9 @@ class PDFPrinter(QObject):
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
                 
-                # 이미지를 새 페이지 전체에 삽입 (270도 회전)
+                # 이미지를 새 페이지 전체에 삽입 (설정된 회전 적용)
                 target_rect = fitz.Rect(0, 0, rotated_width, rotated_height)
-                new_page.insert_image(target_rect, pixmap=pix, rotate=270, keep_proportion=True, overlay=True)
+                new_page.insert_image(target_rect, pixmap=pix, rotate=label_rotation, keep_proportion=True, overlay=True)
             
             temp_path = self._temp_dir / f"{clean_tracking_no}.pdf"
             if temp_path.exists():

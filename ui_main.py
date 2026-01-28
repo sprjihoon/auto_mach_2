@@ -189,7 +189,9 @@ from utils import get_timestamp
 from printer_manager import (
     get_printers, save_printer_settings, load_printer_settings,
     print_pdf_with_printer, check_printer_exists,
-    save_bin_settings, load_bin_settings
+    save_bin_settings, load_bin_settings,
+    validate_printer_settings, get_printer_status_message, auto_select_default_printer,
+    ensure_settings_file
 )
 from pdf_search import find_pdf_by_tracking_or_order
 from reprint_pdf_extractor import extract_pages_from_pdf, extract_reprint_page_to_temp
@@ -5401,6 +5403,44 @@ def run_app():
     """애플리케이션 실행"""
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    
+    # 설정 파일 확인 및 생성 (최초 실행 시)
+    ensure_settings_file()
+    
+    # 프린터 설정 유효성 검사 및 경고
+    validation = validate_printer_settings()
+    
+    # 프린터가 없으면 경고 메시지
+    if not validation["has_any_printer"]:
+        QMessageBox.warning(
+            None,
+            "프린터 경고",
+            "⚠️ 시스템에 프린터가 설치되어 있지 않습니다.\n\n"
+            "송장 출력 기능을 사용하려면 프린터를 설치하세요."
+        )
+    else:
+        # 설정된 프린터가 없으면 자동 선택
+        label_exists = validation["label_printer"]["exists"]
+        label_name = validation["label_printer"]["name"]
+        
+        if not label_name:
+            # 프린터가 설정되지 않았으면 자동 선택
+            auto_select_default_printer()
+            QMessageBox.information(
+                None,
+                "프린터 설정",
+                "프린터가 설정되지 않아 기본 프린터로 자동 설정되었습니다.\n\n"
+                "설정 탭에서 프린터를 변경할 수 있습니다."
+            )
+        elif not label_exists:
+            # 설정된 프린터가 존재하지 않으면 경고
+            QMessageBox.warning(
+                None,
+                "프린터 경고",
+                f"⚠️ 설정된 라벨 프린터 '{label_name}'를 찾을 수 없습니다.\n\n"
+                f"사용 가능한 프린터: {', '.join(validation['available_printers'][:5])}\n\n"
+                f"설정 탭에서 프린터를 다시 선택하세요."
+            )
     
     window = MainWindow()
     window.show()

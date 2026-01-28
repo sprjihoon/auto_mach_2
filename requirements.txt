@@ -16,6 +16,12 @@ pdfplumber>=0.10.0
 PyMuPDF>=1.23.0
 pypdf>=3.0.0
 
+# 이미지 처리 (PDF 출력용)
+Pillow>=10.0.0
+
 # ESP32 WebSocket 통신
 websockets>=12.0
+
+# ESP32 시리얼 테스트 (선택)
+pyserial>=3.5
 

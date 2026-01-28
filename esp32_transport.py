@@ -136,6 +136,21 @@ class Esp32Transport(QObject):
             
             # 이벤트 루프 실행
             self._event_loop.run_forever()
+        except OSError as e:
+            # 포트 사용 중 오류 처리
+            if "address already in use" in str(e).lower() or e.errno == 10048:  # Windows: WSAEADDRINUSE
+                self.error_occurred.emit(
+                    f"포트 {self._port}가 이미 사용 중입니다.\n"
+                    f"다른 프로그램이 이 포트를 사용 중이거나, 프로그램이 이미 실행 중입니다.\n"
+                    f"해결방법: 다른 프로그램 종료 후 재시도하세요."
+                )
+            elif "permission denied" in str(e).lower() or e.errno == 10013:  # Windows: WSAEACCES
+                self.error_occurred.emit(
+                    f"포트 {self._port}에 대한 접근 권한이 없습니다.\n"
+                    f"방화벽 설정을 확인하거나 관리자 권한으로 실행하세요."
+                )
+            else:
+                self.error_occurred.emit(f"서버 네트워크 오류: {str(e)}")
         except Exception as e:
             self.error_occurred.emit(f"서버 오류: {str(e)}")
         finally:
