@@ -25,6 +25,7 @@ from mode_manager import ModeManager, WorkMode, FullPickState
 from device_registry import DeviceRegistry
 from esp32_transport import Esp32Transport
 from full_pick_engine import FullPickEngine
+from work_session import WorkSessionManager, WorkSession
 
 
 class SummaryDialog(QDialog):
@@ -626,6 +627,9 @@ class MainWindow(QMainWindow):
             esp32_transport=self.esp32_transport
         )
         
+        # 작업 세션 관리자
+        self.session_manager = WorkSessionManager()
+        
         # UI 초기화
         self._init_ui()
         self._connect_signals()
@@ -688,6 +692,10 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
         layout.setContentsMargins(0, 0, 0, 0)
         
+        # === 최상단: 작업 차수 표시 ===
+        session_widget = self._create_session_display()
+        layout.addWidget(session_widget)
+        
         # === 상단: 파일 로드 및 설정 ===
         top_group = self._create_top_section()
         layout.addWidget(top_group)
@@ -711,6 +719,158 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, 1)
         
         return tab
+    
+    def _create_session_display(self) -> QWidget:
+        """작업 차수 표시 영역 (출고 탭 상단)"""
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(10, 5, 10, 5)
+        
+        # 현재 작업 차수 표시
+        session_frame = QFrame()
+        session_frame.setStyleSheet("""
+            QFrame {
+                background-color: #E8EAF6;
+                border: 2px solid #3F51B5;
+                border-radius: 8px;
+                padding: 5px;
+            }
+        """)
+        session_layout = QHBoxLayout(session_frame)
+        session_layout.setContentsMargins(10, 5, 10, 5)
+        
+        # 차수 라벨
+        self.session_display_label = QLabel("📋 작업 대기")
+        self.session_display_label.setFont(QFont("Arial", 14, QFont.Bold))
+        self.session_display_label.setStyleSheet("color: #3F51B5; border: none;")
+        session_layout.addWidget(self.session_display_label)
+        
+        # 구분선
+        separator = QLabel("|")
+        separator.setStyleSheet("color: #9E9E9E; border: none;")
+        session_layout.addWidget(separator)
+        
+        # 업체 라벨
+        self.session_supplier_label = QLabel("🏢 업체: 미선택")
+        self.session_supplier_label.setFont(QFont("Arial", 12))
+        self.session_supplier_label.setStyleSheet("color: #FF9800; border: none;")
+        session_layout.addWidget(self.session_supplier_label)
+        
+        # 구분선
+        separator2 = QLabel("|")
+        separator2.setStyleSheet("color: #9E9E9E; border: none;")
+        session_layout.addWidget(separator2)
+        
+        # 주문/SKU 정보
+        self.session_info_label = QLabel("📦 0건, 0 SKU")
+        self.session_info_label.setFont(QFont("Arial", 11))
+        self.session_info_label.setStyleSheet("color: #666; border: none;")
+        session_layout.addWidget(self.session_info_label)
+        
+        layout.addWidget(session_frame)
+        
+        # 세션 목록 드롭다운
+        layout.addWidget(QLabel("저장된 차수:"))
+        self.session_combo = QComboBox()
+        self.session_combo.setMinimumWidth(250)
+        self.session_combo.addItem("-- 선택 --", 0)
+        self.session_combo.currentIndexChanged.connect(self._on_session_combo_changed)
+        layout.addWidget(self.session_combo)
+        
+        # 세션 관리 버튼
+        self.session_clear_btn = QPushButton("🗑️ 초기화")
+        self.session_clear_btn.setMaximumWidth(80)
+        self.session_clear_btn.clicked.connect(self._on_clear_sessions)
+        layout.addWidget(self.session_clear_btn)
+        
+        layout.addStretch()
+        
+        return widget
+    
+    def _update_session_display(self):
+        """작업 차수 표시 업데이트"""
+        session = self.session_manager.current_session
+        
+        if session:
+            self.session_display_label.setText(f"📋 {session.session_id}차 작업")
+            self.session_supplier_label.setText(f"🏢 업체: {session.supplier_display}")
+            self.session_info_label.setText(f"📦 {session.order_count}건, {session.sku_count} SKU, {session.bin_count} BIN")
+            
+            # 작업 차수 변수도 업데이트
+            self._work_session = session.session_id
+            self._work_session_supplier = session.supplier_display
+        else:
+            self.session_display_label.setText("📋 작업 대기")
+            self.session_supplier_label.setText("🏢 업체: 미선택")
+            self.session_info_label.setText("📦 0건, 0 SKU")
+    
+    def _update_session_combo(self):
+        """세션 드롭다운 업데이트"""
+        self.session_combo.blockSignals(True)
+        self.session_combo.clear()
+        self.session_combo.addItem("-- 선택 --", 0)
+        
+        for session_id, display_name in self.session_manager.get_session_choices():
+            self.session_combo.addItem(display_name, session_id)
+        
+        # 현재 세션 선택
+        if self.session_manager.current_session:
+            for i in range(self.session_combo.count()):
+                if self.session_combo.itemData(i) == self.session_manager.current_session.session_id:
+                    self.session_combo.setCurrentIndex(i)
+                    break
+        
+        self.session_combo.blockSignals(False)
+    
+    @Slot(int)
+    def _on_session_combo_changed(self, index: int):
+        """세션 드롭다운 변경"""
+        session_id = self.session_combo.itemData(index)
+        if session_id and session_id > 0:
+            session = self.session_manager.select_session(session_id)
+            if session:
+                self._load_session(session)
+    
+    def _load_session(self, session: WorkSession):
+        """저장된 세션 로드"""
+        # 업체 필터 적용
+        if session.suppliers:
+            if len(session.suppliers) == 1:
+                self.excel_loader.filter_by_supplier(session.suppliers[0])
+            else:
+                self.excel_loader.filter_by_supplier(session.suppliers)
+        
+        # BIN 매핑 복원 (선택적)
+        # self.bin_manager._sku_bin_map = session.sku_bin_map.copy()
+        
+        # 작업 차수 업데이트
+        self._work_session = session.session_id
+        self._work_session_supplier = session.supplier_display
+        
+        # UI 업데이트
+        self._update_session_display()
+        self._update_fp_session_info()
+        
+        self._add_log(f"<b style='color:#3F51B5'>[세션 로드] {session.session_id}차 작업 - {session.supplier_display}</b>", html=True)
+    
+    @Slot()
+    def _on_clear_sessions(self):
+        """모든 세션 초기화"""
+        reply = QMessageBox.question(
+            self,
+            "세션 초기화",
+            "저장된 모든 작업 차수를 삭제하시겠습니까?\n\n"
+            "이 작업은 되돌릴 수 없습니다.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.session_manager.clear_all_sessions()
+            self._work_session = 0
+            self._work_session_supplier = ""
+            self._update_session_display()
+            self._update_session_combo()
+            self._update_fp_session_info()
+            self._add_log("[세션] 모든 작업 차수가 초기화되었습니다.")
     
     def _create_reprint_tab(self) -> QWidget:
         """재출력 탭 생성"""
@@ -856,30 +1016,44 @@ class MainWindow(QMainWindow):
         layout.setSpacing(15)
         layout.setContentsMargins(20, 20, 20, 20)
         
-        # ===== 상단 1행: 작업 차수 및 업체 =====
+        # ===== 상단 1행: 작업 차수 선택 =====
         session_layout = QHBoxLayout()
         
-        # 작업 차수 표시
-        session_group = QGroupBox("📋 작업 차수")
-        session_grp_layout = QHBoxLayout(session_group)
-        self.fp_session_label = QLabel("0차 전체피킹")
-        self.fp_session_label.setFont(QFont("Arial", 16, QFont.Bold))
-        self.fp_session_label.setStyleSheet("color: #9C27B0;")  # 보라색
-        session_grp_layout.addWidget(self.fp_session_label)
-        session_layout.addWidget(session_group)
+        # 작업 차수 선택 드롭다운
+        session_select_group = QGroupBox("📋 작업 차수 선택")
+        session_select_layout = QHBoxLayout(session_select_group)
+        
+        self.fp_session_combo = QComboBox()
+        self.fp_session_combo.setMinimumWidth(300)
+        self.fp_session_combo.setFont(QFont("Arial", 12))
+        self.fp_session_combo.addItem("-- 출고 탭에서 업체 선택 필요 --", 0)
+        self.fp_session_combo.currentIndexChanged.connect(self._on_fp_session_combo_changed)
+        session_select_layout.addWidget(self.fp_session_combo)
+        
+        # 새로고침 버튼
+        self.fp_refresh_session_btn = QPushButton("🔄")
+        self.fp_refresh_session_btn.setMaximumWidth(40)
+        self.fp_refresh_session_btn.clicked.connect(self._update_fp_session_combo)
+        session_select_layout.addWidget(self.fp_refresh_session_btn)
+        
+        session_layout.addWidget(session_select_group)
+        
+        # 현재 선택된 차수 표시
+        current_group = QGroupBox("🎯 현재 작업")
+        current_layout = QHBoxLayout(current_group)
+        self.fp_session_label = QLabel("미선택")
+        self.fp_session_label.setFont(QFont("Arial", 14, QFont.Bold))
+        self.fp_session_label.setStyleSheet("color: #9C27B0;")
+        current_layout.addWidget(self.fp_session_label)
+        session_layout.addWidget(current_group)
         
         # 현재 업체 표시
-        supplier_group = QGroupBox("🏢 현재 업체")
+        supplier_group = QGroupBox("🏢 업체")
         supplier_grp_layout = QHBoxLayout(supplier_group)
         self.fp_supplier_label = QLabel("업체 미선택")
-        self.fp_supplier_label.setFont(QFont("Arial", 14, QFont.Bold))
+        self.fp_supplier_label.setFont(QFont("Arial", 12, QFont.Bold))
         self.fp_supplier_label.setStyleSheet("color: #FF9800;")
         supplier_grp_layout.addWidget(self.fp_supplier_label)
-        
-        # 업체 변경 버튼
-        self.fp_change_supplier_btn = QPushButton("🔄 업체 변경")
-        self.fp_change_supplier_btn.clicked.connect(self._on_fp_change_supplier)
-        supplier_grp_layout.addWidget(self.fp_change_supplier_btn)
         session_layout.addWidget(supplier_group)
         
         # 데이터 상태
@@ -1407,9 +1581,9 @@ class MainWindow(QMainWindow):
         """전체피킹 탭의 작업 차수/업체 정보 업데이트"""
         # 작업 차수
         if self._work_session > 0:
-            self.fp_session_label.setText(f"{self._work_session}차 전체피킹")
+            self.fp_session_label.setText(f"{self._work_session}차 피킹")
         else:
-            self.fp_session_label.setText("0차 전체피킹")
+            self.fp_session_label.setText("미선택")
         
         # 현재 업체
         if self._work_session_supplier:
@@ -1428,6 +1602,71 @@ class MainWindow(QMainWindow):
             self.fp_data_status.setText(f"{order_count}건, {sku_count} SKU")
         else:
             self.fp_data_status.setText("엑셀 미로드")
+        
+        # 드롭다운도 업데이트
+        self._update_fp_session_combo()
+    
+    def _update_fp_session_combo(self):
+        """전체피킹 탭의 세션 드롭다운 업데이트"""
+        self.fp_session_combo.blockSignals(True)
+        self.fp_session_combo.clear()
+        
+        sessions = self.session_manager.get_all_sessions()
+        
+        if not sessions:
+            self.fp_session_combo.addItem("-- 출고 탭에서 업체 선택 필요 --", 0)
+        else:
+            self.fp_session_combo.addItem("-- 작업 차수 선택 --", 0)
+            for session in sessions:
+                display = f"{session.session_id}차 [{session.supplier_display}] - {session.order_count}건, {session.sku_count} SKU"
+                self.fp_session_combo.addItem(display, session.session_id)
+        
+        # 현재 세션 선택
+        if self.session_manager.current_session:
+            for i in range(self.fp_session_combo.count()):
+                if self.fp_session_combo.itemData(i) == self.session_manager.current_session.session_id:
+                    self.fp_session_combo.setCurrentIndex(i)
+                    break
+        
+        self.fp_session_combo.blockSignals(False)
+    
+    @Slot(int)
+    def _on_fp_session_combo_changed(self, index: int):
+        """전체피킹 탭 세션 드롭다운 변경"""
+        session_id = self.fp_session_combo.itemData(index)
+        if session_id and session_id > 0:
+            session = self.session_manager.select_session(session_id)
+            if session:
+                self._load_fp_session(session)
+    
+    def _load_fp_session(self, session: WorkSession):
+        """전체피킹용 세션 로드"""
+        # 업체 필터 적용
+        if session.suppliers:
+            if len(session.suppliers) == 1:
+                self.excel_loader.filter_by_supplier(session.suppliers[0])
+            else:
+                self.excel_loader.filter_by_supplier(session.suppliers)
+        
+        # 작업 차수 업데이트
+        self._work_session = session.session_id
+        self._work_session_supplier = session.supplier_display
+        
+        # BIN 매핑 복원 (있는 경우)
+        if session.sku_bin_map:
+            self.bin_manager._sku_bin_map = session.sku_bin_map.copy()
+            self.bin_manager._initialized = True
+        
+        # UI 업데이트
+        self.fp_session_label.setText(f"{session.session_id}차 피킹")
+        self.fp_supplier_label.setText(session.supplier_display)
+        self.fp_data_status.setText(f"{session.order_count}건, {session.sku_count} SKU")
+        
+        # 출고 탭 UI도 동기화
+        self._update_session_display()
+        
+        self._add_fp_log(f"[세션 로드] {session.session_id}차 작업 - {session.supplier_display}")
+        self._add_fp_log(f"  → {session.order_count}건, {session.sku_count} SKU, {session.bin_count} BIN")
     
     @Slot()
     def _on_reprint_search(self):
@@ -2776,6 +3015,36 @@ class MainWindow(QMainWindow):
         
         # 구성 요약 출력
         self._show_load_summary()
+        
+        # ====== 작업 세션 저장 ======
+        order_count = self.excel_loader.get_filtered_order_count()
+        sku_count = len(self.excel_loader.df['barcode'].unique()) if self.excel_loader.df is not None and 'barcode' in self.excel_loader.df.columns else 0
+        bin_count = self.bin_manager.get_bin_count()
+        
+        # 현재 선택된 업체 목록
+        suppliers = self.excel_loader.get_current_suppliers() or []
+        supplier_display = self._work_session_supplier
+        
+        # SKU → BIN 매핑 스냅샷
+        sku_bin_map = self.bin_manager.get_sku_bin_map()
+        
+        # 세션 생성 및 저장
+        session = self.session_manager.create_session(
+            suppliers=suppliers,
+            supplier_display=supplier_display,
+            order_count=order_count,
+            sku_count=sku_count,
+            bin_count=bin_count,
+            mode="reverse_matching",
+            sku_bin_map=sku_bin_map
+        )
+        
+        self._add_log(f"<b style='color:#4CAF50'>[세션 저장] {session.session_id}차 작업 저장됨 ({supplier_display})</b>", html=True)
+        
+        # UI 업데이트
+        self._update_session_display()
+        self._update_session_combo()
+        self._update_fp_session_info()
     
     @Slot()
     def _on_change_supplier(self):
