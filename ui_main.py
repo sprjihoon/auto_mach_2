@@ -1682,9 +1682,13 @@ class MainWindow(QMainWindow):
     
     def _on_pp_slot_complete(self, slot_id: int):
         """슬롯 완료 버튼 클릭 - 슬롯 비우고 중복 방지 목록에 추가"""
+        from pre_pick_engine import play_slot_complete_sound
+        
         slot = self.pre_pick_engine.slot_manager.get_slot(slot_id)
         if slot:
             tracking_no = slot.tracking_no
+            # 완료 신호음
+            play_slot_complete_sound()
             # 중복 방지 목록에 추가
             self.pre_pick_engine._completed_orders.add(tracking_no)
             # 슬롯 비우기
