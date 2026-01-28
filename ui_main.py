@@ -190,6 +190,120 @@ from reprint_pdf_extractor import extract_pages_from_pdf, extract_reprint_page_t
 from bin_manager import BinManager
 
 
+class SupplierSelectDialog(QDialog):
+    """업체(공급처) 선택 다이얼로그"""
+    
+    def __init__(self, supplier_summary: list, parent=None):
+        """
+        Args:
+            supplier_summary: [{"supplier": "업체A", "order_count": 10, "item_count": 50}, ...]
+        """
+        super().__init__(parent)
+        self.supplier_summary = supplier_summary
+        self.selected_supplier = None
+        self.setWindowTitle("🏢 업체 선택")
+        self.setMinimumSize(500, 400)
+        self._init_ui()
+    
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        # 헤더
+        header = QLabel("<h2>🏢 업체를 선택하세요</h2>")
+        header.setAlignment(Qt.AlignCenter)
+        layout.addWidget(header)
+        
+        # 설명
+        desc = QLabel(
+            "엑셀 파일에 여러 업체(공급처)의 데이터가 포함되어 있습니다.\n"
+            "작업할 업체를 선택해주세요."
+        )
+        desc.setStyleSheet("color: #666; padding: 10px; background: #f5f5f5; border-radius: 5px;")
+        desc.setWordWrap(True)
+        desc.setAlignment(Qt.AlignCenter)
+        layout.addWidget(desc)
+        
+        # 업체 목록 (라디오 버튼)
+        list_group = QGroupBox("업체 목록")
+        list_layout = QVBoxLayout(list_group)
+        
+        # 스크롤 영역
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setSpacing(8)
+        
+        self.supplier_group = QButtonGroup(self)
+        
+        # 전체 옵션 추가
+        total_orders = sum(s["order_count"] for s in self.supplier_summary)
+        total_items = sum(s["item_count"] for s in self.supplier_summary)
+        
+        all_radio = QRadioButton(f"전체 ({len(self.supplier_summary)}개 업체, {total_orders}건, {total_items}개)")
+        all_radio.setStyleSheet("font-weight: bold; font-size: 13px; padding: 8px;")
+        all_radio.setProperty("supplier", "전체")
+        self.supplier_group.addButton(all_radio)
+        scroll_layout.addWidget(all_radio)
+        
+        # 구분선
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("background-color: #ddd;")
+        scroll_layout.addWidget(line)
+        
+        # 각 업체별 라디오 버튼
+        for idx, item in enumerate(self.supplier_summary):
+            supplier = item["supplier"]
+            order_count = item["order_count"]
+            item_count = item["item_count"]
+            
+            radio = QRadioButton(f"{supplier}  ({order_count}건, {item_count}개)")
+            radio.setStyleSheet("font-size: 12px; padding: 6px;")
+            radio.setProperty("supplier", supplier)
+            self.supplier_group.addButton(radio)
+            scroll_layout.addWidget(radio)
+        
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        list_layout.addWidget(scroll)
+        
+        layout.addWidget(list_group, 1)
+        
+        # 버튼 영역
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        cancel_btn = QPushButton("취소")
+        cancel_btn.setMinimumWidth(100)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        select_btn = QPushButton("선택")
+        select_btn.setMinimumWidth(100)
+        select_btn.setStyleSheet("background: #4CAF50; color: white; font-weight: bold;")
+        select_btn.clicked.connect(self._on_select)
+        btn_layout.addWidget(select_btn)
+        
+        layout.addLayout(btn_layout)
+    
+    def _on_select(self):
+        """업체 선택 확정"""
+        checked_btn = self.supplier_group.checkedButton()
+        if checked_btn:
+            self.selected_supplier = checked_btn.property("supplier")
+            self.accept()
+        else:
+            QMessageBox.warning(self, "경고", "업체를 선택해주세요.")
+    
+    def get_selected_supplier(self) -> str:
+        """선택된 업체 반환"""
+        return self.selected_supplier
+
+
 class BinSettingsDialog(QDialog):
     """BIN 설정 다이얼로그"""
     
@@ -1098,6 +1212,12 @@ class MainWindow(QMainWindow):
         self.summary_btn.clicked.connect(self._on_show_summary)
         layout.addWidget(self.summary_btn)
         
+        # 업체 변경 버튼
+        self.supplier_btn = QPushButton("🏢 업체변경")
+        self.supplier_btn.clicked.connect(self._on_change_supplier)
+        self.supplier_btn.setToolTip("다른 업체(공급처)로 변경")
+        layout.addWidget(self.supplier_btn)
+        
         layout.addSpacing(15)
         
         # PDF 파일 경로
@@ -1829,87 +1949,191 @@ class MainWindow(QMainWindow):
         
         if self.excel_loader.load_excel(file_path):
             self._add_log(f"엑셀 파일 로드 성공: {file_path}")
-            self.status_file.setText(f"파일: {Path(file_path).name}")
             
-            # ====== BIN 자동 배정 (엑셀 로드 시) ======
-            # 0) BIN 설정 로드 및 적용
-            bin_settings = load_bin_settings()
-            self.bin_manager.set_config(
-                max_qty_per_bin=bin_settings.get("max_qty_per_bin", 100),
-                min_qty_threshold=bin_settings.get("min_qty_threshold", 10),
-                max_sku_per_shared_bin=bin_settings.get("max_sku_per_shared_bin", 5),
-                dedicated_qty_threshold=bin_settings.get("dedicated_qty_threshold", 0)
-            )
-            dedicated_qty = bin_settings.get("dedicated_qty_threshold", 0)
-            dedicated_log = f", 중복금지={dedicated_qty}개 이상" if dedicated_qty > 0 else ""
-            self._add_log(f"[BIN] 설정 적용: 최대수량={bin_settings.get('max_qty_per_bin', 100)}, "
-                         f"소량기준={bin_settings.get('min_qty_threshold', 10)}이하, "
-                         f"공유BIN 최대SKU={bin_settings.get('max_sku_per_shared_bin', 5)}{dedicated_log}")
+            # 원본 데이터 저장 (업체 필터링 전)
+            self.excel_loader.store_original_data()
             
-            # 1) BIN 전체 리셋
-            self.bin_manager.reset()
-            self._add_log("[BIN] BIN 정보 리셋 완료")
-            self._update_bin_display(["BIN 미지정"])
-            
-            # 제외 송장 목록 초기화 (새 작업 세션)
-            self._excluded_tracking_numbers.clear()
-            self._update_exclude_tracking_list()
-            self._add_log("[제외] 제외 송장 목록 초기화됨")
-            
-            # 2) SKU별 BIN 자동 배정
-            bin_count = self.bin_manager.assign_bins_from_dataframe(self.excel_loader.df)
-            if bin_count > 0:
-                # 통계 정보 가져오기
-                stats = self.bin_manager.get_statistics()
-                shared_bins = stats.get("shared_bins", 0)
-                dedicated_bins = stats.get("dedicated_bins", 0)
+            # 공급처(업체) 컬럼이 있는지 확인
+            if self.excel_loader.has_supplier_column():
+                supplier_summary = self.excel_loader.get_supplier_summary()
                 
-                self._add_log(f"<b style='color:#2196F3'>[BIN] SKU별 BIN 자동 배정 완료: {bin_count}개 BIN 생성 "
-                             f"(전용: {dedicated_bins}, 공유: {shared_bins})</b>", html=True)
-                
-                # BIN 배정 상세 로그 (확장 정보 포함)
-                sku_bins = self.bin_manager.get_all_sku_bins()
-                for item in sku_bins[:10]:  # 처음 10개만 로그
-                    barcode, bin_id, bin_num, sku_qty, is_shared = item
-                    shared_tag = " [공유]" if is_shared else ""
-                    self._add_log(f"  → {bin_id}{shared_tag}: {barcode} (수량: {sku_qty})")
-                if len(sku_bins) > 10:
-                    self._add_log(f"  ... 외 {len(sku_bins) - 10}개")
-            else:
-                self._add_log("[BIN] SKU가 없어서 BIN 배정 건너뜀")
-            
-            # 3) 송장별 BIN 매핑 구축
-            self.bin_manager.build_order_bin_map(self.excel_loader.df)
-            order_bin_count = len(self.bin_manager.get_order_bin_map())
-            self._add_log(f"[BIN] 송장별 BIN 매핑 완료: {order_bin_count}개 송장")
-            
-            # PDF 폴더 설정
-            pdf_path = self.pdf_path_edit.text().strip()
-            if pdf_path:
-                self.pdf_printer.set_labels_directory(pdf_path)
-            
-            # PDF 파일이 설정되어 있으면 자동으로 다시 스캔 (이미지 PDF 매핑을 위해)
-            pdf_file_path = self.pdf_path_edit.text().strip()
-            if pdf_file_path and os.path.exists(pdf_file_path):
-                self.pdf_printer.set_pdf_file(pdf_file_path)
-                self._add_log("엑셀 로드 후 PDF 재스캔 중...")
-                
-                # 엑셀에서 송장번호 목록 가져오기 (순서 보장)
-                excel_tracking_numbers = None
-                if self.excel_loader.df is not None and 'tracking_no' in self.excel_loader.df.columns:
-                    # 순서를 보장하기 위해 drop_duplicates 사용 (첫 번째 출현 순서 유지)
-                    excel_tracking_numbers = self.excel_loader.df['tracking_no'].drop_duplicates().tolist()
-                    self._add_log(f"엑셀 송장번호 순서: {', '.join(map(str, excel_tracking_numbers[:5]))}..." if len(excel_tracking_numbers) > 5 else f"엑셀 송장번호: {', '.join(map(str, excel_tracking_numbers))}")
-                
-                count = self.pdf_printer.build_tracking_index(excel_tracking_numbers)
-                
-                if count > 0:
-                    self._add_log(f"<b style='color:#4CAF50'>✓ PDF 재스캔 완료: {count}개 송장번호 발견</b>", html=True)
+                if len(supplier_summary) > 1:
+                    # 여러 업체가 있으면 선택 다이얼로그 표시
+                    self._add_log(f"[업체] {len(supplier_summary)}개 업체 발견: {', '.join([s['supplier'] for s in supplier_summary])}")
+                    
+                    dialog = SupplierSelectDialog(supplier_summary, self)
+                    if dialog.exec() == QDialog.Accepted:
+                        selected = dialog.get_selected_supplier()
+                        if selected and selected != "전체":
+                            # 선택한 업체로 필터링
+                            self.excel_loader.filter_by_supplier(selected)
+                            self._add_log(f"<b style='color:#2196F3'>[업체] '{selected}' 선택됨 - {self.excel_loader.get_filtered_order_count()}건</b>", html=True)
+                        else:
+                            self._add_log(f"[업체] 전체 업체 선택 - {self.excel_loader.get_total_order_count()}건")
+                    else:
+                        # 취소 시 로드 중단
+                        self._add_log("[업체] 업체 선택 취소됨 - 로드 중단")
+                        return
+                elif len(supplier_summary) == 1:
+                    # 업체가 하나뿐이면 자동 선택
+                    supplier = supplier_summary[0]["supplier"]
+                    self._add_log(f"[업체] 단일 업체: '{supplier}' 자동 선택")
                 else:
-                    self._add_log("[경고] PDF 재스캔 실패: 송장번호를 찾지 못했습니다.")
+                    self._add_log("[업체] 공급처 데이터 없음")
             
-            # 구성 요약 출력
-            self._show_load_summary()
+            # 현재 선택된 업체 표시
+            current_supplier = self.excel_loader.get_current_supplier()
+            if current_supplier:
+                self.status_file.setText(f"파일: {Path(file_path).name} | 업체: {current_supplier}")
+            else:
+                self.status_file.setText(f"파일: {Path(file_path).name}")
+            
+            # 이후 로직 실행 (BIN 배정, PDF 스캔 등)
+            self._process_after_supplier_selection(file_path)
+    
+    def _process_after_supplier_selection(self, file_path: str):
+        """업체 선택 후 실행되는 로직 (BIN 배정, PDF 스캔 등)"""
+        # ====== BIN 자동 배정 (엑셀 로드 시) ======
+        # 0) BIN 설정 로드 및 적용
+        bin_settings = load_bin_settings()
+        self.bin_manager.set_config(
+            max_qty_per_bin=bin_settings.get("max_qty_per_bin", 100),
+            min_qty_threshold=bin_settings.get("min_qty_threshold", 10),
+            max_sku_per_shared_bin=bin_settings.get("max_sku_per_shared_bin", 5),
+            dedicated_qty_threshold=bin_settings.get("dedicated_qty_threshold", 0)
+        )
+        dedicated_qty = bin_settings.get("dedicated_qty_threshold", 0)
+        dedicated_log = f", 중복금지={dedicated_qty}개 이상" if dedicated_qty > 0 else ""
+        self._add_log(f"[BIN] 설정 적용: 최대수량={bin_settings.get('max_qty_per_bin', 100)}, "
+                     f"소량기준={bin_settings.get('min_qty_threshold', 10)}이하, "
+                     f"공유BIN 최대SKU={bin_settings.get('max_sku_per_shared_bin', 5)}{dedicated_log}")
+        
+        # 1) BIN 전체 리셋
+        self.bin_manager.reset()
+        self._add_log("[BIN] BIN 정보 리셋 완료")
+        self._update_bin_display(["BIN 미지정"])
+        
+        # 제외 송장 목록 초기화 (새 작업 세션)
+        self._excluded_tracking_numbers.clear()
+        self._update_exclude_tracking_list()
+        self._add_log("[제외] 제외 송장 목록 초기화됨")
+        
+        # 2) SKU별 BIN 자동 배정
+        bin_count = self.bin_manager.assign_bins_from_dataframe(self.excel_loader.df)
+        if bin_count > 0:
+            # 통계 정보 가져오기
+            stats = self.bin_manager.get_statistics()
+            shared_bins = stats.get("shared_bins", 0)
+            dedicated_bins = stats.get("dedicated_bins", 0)
+            
+            self._add_log(f"<b style='color:#2196F3'>[BIN] SKU별 BIN 자동 배정 완료: {bin_count}개 BIN 생성 "
+                         f"(전용: {dedicated_bins}, 공유: {shared_bins})</b>", html=True)
+            
+            # BIN 배정 상세 로그 (확장 정보 포함)
+            sku_bins = self.bin_manager.get_all_sku_bins()
+            for item in sku_bins[:10]:  # 처음 10개만 로그
+                barcode, bin_id, bin_num, sku_qty, is_shared = item
+                shared_tag = " [공유]" if is_shared else ""
+                self._add_log(f"  → {bin_id}{shared_tag}: {barcode} (수량: {sku_qty})")
+            if len(sku_bins) > 10:
+                self._add_log(f"  ... 외 {len(sku_bins) - 10}개")
+        else:
+            self._add_log("[BIN] SKU가 없어서 BIN 배정 건너뜀")
+        
+        # 3) 송장별 BIN 매핑 구축
+        self.bin_manager.build_order_bin_map(self.excel_loader.df)
+        order_bin_count = len(self.bin_manager.get_order_bin_map())
+        self._add_log(f"[BIN] 송장별 BIN 매핑 완료: {order_bin_count}개 송장")
+        
+        # PDF 폴더 설정
+        pdf_path = self.pdf_path_edit.text().strip()
+        if pdf_path:
+            self.pdf_printer.set_labels_directory(pdf_path)
+        
+        # PDF 파일이 설정되어 있으면 자동으로 다시 스캔 (이미지 PDF 매핑을 위해)
+        pdf_file_path = self.pdf_path_edit.text().strip()
+        if pdf_file_path and os.path.exists(pdf_file_path):
+            self.pdf_printer.set_pdf_file(pdf_file_path)
+            self._add_log("엑셀 로드 후 PDF 재스캔 중...")
+            
+            # 엑셀에서 송장번호 목록 가져오기 (순서 보장)
+            excel_tracking_numbers = None
+            if self.excel_loader.df is not None and 'tracking_no' in self.excel_loader.df.columns:
+                # 순서를 보장하기 위해 drop_duplicates 사용 (첫 번째 출현 순서 유지)
+                excel_tracking_numbers = self.excel_loader.df['tracking_no'].drop_duplicates().tolist()
+                self._add_log(f"엑셀 송장번호 순서: {', '.join(map(str, excel_tracking_numbers[:5]))}..." if len(excel_tracking_numbers) > 5 else f"엑셀 송장번호: {', '.join(map(str, excel_tracking_numbers))}")
+            
+            count = self.pdf_printer.build_tracking_index(excel_tracking_numbers)
+            
+            if count > 0:
+                self._add_log(f"<b style='color:#4CAF50'>✓ PDF 재스캔 완료: {count}개 송장번호 발견</b>", html=True)
+            else:
+                self._add_log("[경고] PDF 재스캔 실패: 송장번호를 찾지 못했습니다.")
+        
+        # 구성 요약 출력
+        self._show_load_summary()
+    
+    @Slot()
+    def _on_change_supplier(self):
+        """업체(공급처) 변경"""
+        # 원본 데이터가 없으면 경고
+        if self.excel_loader._df_original is None:
+            QMessageBox.warning(self, "경고", "먼저 엑셀 파일을 불러오세요.")
+            return
+        
+        # 공급처 컬럼이 없으면 경고
+        if not self.excel_loader.has_supplier_column():
+            QMessageBox.information(self, "알림", "엑셀 파일에 공급처(업체) 컬럼이 없습니다.")
+            return
+        
+        # 업체 목록 가져오기
+        supplier_summary = self.excel_loader.get_supplier_summary()
+        
+        if not supplier_summary:
+            QMessageBox.information(self, "알림", "공급처 데이터가 없습니다.")
+            return
+        
+        if len(supplier_summary) <= 1:
+            QMessageBox.information(self, "알림", "변경할 수 있는 다른 업체가 없습니다.")
+            return
+        
+        # 업체 선택 다이얼로그 표시
+        dialog = SupplierSelectDialog(supplier_summary, self)
+        if dialog.exec() == QDialog.Accepted:
+            selected = dialog.get_selected_supplier()
+            current = self.excel_loader.get_current_supplier()
+            
+            # 같은 업체 선택 시 무시
+            if selected == current or (selected == "전체" and current is None):
+                self._add_log("[업체] 동일한 업체 선택됨 - 변경 없음")
+                return
+            
+            # 업체 변경 적용
+            if selected and selected != "전체":
+                self.excel_loader.filter_by_supplier(selected)
+                self._add_log(f"<b style='color:#FF9800'>[업체 변경] '{selected}' 선택됨 - {self.excel_loader.get_filtered_order_count()}건</b>", html=True)
+            else:
+                self.excel_loader.filter_by_supplier(None)
+                self._add_log(f"<b style='color:#FF9800'>[업체 변경] 전체 업체 선택 - {self.excel_loader.get_total_order_count()}건</b>", html=True)
+            
+            # 상태바 업데이트
+            file_path = self.excel_path_edit.text().strip()
+            current_supplier = self.excel_loader.get_current_supplier()
+            if current_supplier:
+                self.status_file.setText(f"파일: {Path(file_path).name} | 업체: {current_supplier}")
+            else:
+                self.status_file.setText(f"파일: {Path(file_path).name}")
+            
+            # BIN 및 PDF 재처리
+            self._process_after_supplier_selection(file_path)
+            
+            QMessageBox.information(
+                self,
+                "업체 변경 완료",
+                f"업체가 변경되었습니다.\n\n"
+                f"선택 업체: {selected}\n"
+                f"주문 건수: {self.excel_loader.get_filtered_order_count()}건"
+            )
     
     @Slot()
     def _on_save_excel(self):

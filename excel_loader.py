@@ -34,6 +34,12 @@ class ExcelLoader(QObject):
         '주문일': 'order_date',
         '주문시간': 'order_time',
         '주문번호': 'order_no',
+        '공급처': 'supplier',
+        '공급처명': 'supplier',
+        '업체': 'supplier',
+        '업체명': 'supplier',
+        '거래처': 'supplier',
+        '거래처명': 'supplier',
     }
     
     # 대체 컬럼명 (상품수량이 없을 때만 사용)
@@ -42,6 +48,7 @@ class ExcelLoader(QObject):
     def __init__(self):
         super().__init__()
         self.df: Optional[pd.DataFrame] = None
+        self._df_original: Optional[pd.DataFrame] = None  # 전체 원본 데이터 (업체 필터 전)
         self.file_path: Optional[Path] = None
         # 송장별 메타데이터 캐시 (성능 최적화)
         self._metadata_cache: Optional[Dict[str, Dict[str, Any]]] = None
@@ -49,6 +56,8 @@ class ExcelLoader(QObject):
         self._priority_rules: Optional[Dict[str, bool]] = None
         # 송장별 ⭐ 고정 상태 저장 (tracking_no -> is_priority)
         self._priority_tracking: Dict[str, bool] = {}
+        # 현재 선택된 업체(공급처)
+        self._current_supplier: Optional[str] = None
     
     def load_excel(self, file_path: str) -> bool:
         """엑셀 파일 로드 (xls, xlsx, csv, html 등 지원)"""
@@ -756,4 +765,144 @@ class ExcelLoader(QObject):
             return []
         
         return pending['tracking_no'].drop_duplicates().tolist()
+    
+    # ============================================================
+    # 공급처(업체) 관리 기능
+    # ============================================================
+    
+    def has_supplier_column(self) -> bool:
+        """
+        공급처 컬럼이 있는지 확인
+        
+        Returns:
+            공급처 컬럼 존재 여부
+        """
+        df = self._df_original if self._df_original is not None else self.df
+        if df is None:
+            return False
+        return 'supplier' in df.columns
+    
+    def get_suppliers(self) -> List[str]:
+        """
+        전체 데이터에서 공급처(업체) 목록 추출
+        
+        Returns:
+            공급처 리스트 (중복 제거, 정렬)
+        """
+        df = self._df_original if self._df_original is not None else self.df
+        if df is None:
+            return []
+        
+        if 'supplier' not in df.columns:
+            return []
+        
+        # 공급처 목록 추출 (빈 값 제외, 중복 제거, 정렬)
+        suppliers = df['supplier'].dropna().astype(str).str.strip()
+        suppliers = suppliers[suppliers != '']
+        suppliers = suppliers[suppliers.str.lower() != 'nan']
+        unique_suppliers = sorted(suppliers.unique().tolist())
+        
+        return unique_suppliers
+    
+    def get_supplier_summary(self) -> List[Dict[str, Any]]:
+        """
+        공급처별 요약 정보 반환
+        
+        Returns:
+            [{"supplier": "업체A", "order_count": 10, "item_count": 50}, ...]
+        """
+        df = self._df_original if self._df_original is not None else self.df
+        if df is None:
+            return []
+        
+        if 'supplier' not in df.columns:
+            return []
+        
+        summary = []
+        for supplier in self.get_suppliers():
+            supplier_df = df[df['supplier'].astype(str).str.strip() == supplier]
+            order_count = supplier_df['tracking_no'].nunique()
+            item_count = int(supplier_df['qty'].sum()) if 'qty' in supplier_df.columns else len(supplier_df)
+            
+            summary.append({
+                "supplier": supplier,
+                "order_count": order_count,
+                "item_count": item_count
+            })
+        
+        return summary
+    
+    def filter_by_supplier(self, supplier: str) -> bool:
+        """
+        특정 공급처로 데이터 필터링
+        필터링 후 self.df는 해당 공급처 데이터만 포함
+        
+        Args:
+            supplier: 공급처명 (None이면 전체 데이터)
+        
+        Returns:
+            성공 여부
+        """
+        if self._df_original is None:
+            return False
+        
+        try:
+            if supplier is None or supplier == "" or supplier == "전체":
+                # 전체 데이터 사용
+                self.df = self._df_original.copy()
+                self._current_supplier = None
+            else:
+                # 해당 공급처만 필터링
+                mask = self._df_original['supplier'].astype(str).str.strip() == supplier
+                self.df = self._df_original[mask].copy()
+                self._current_supplier = supplier
+            
+            # 메타데이터 캐시 초기화
+            self._metadata_cache = None
+            
+            self.data_loaded.emit()
+            return True
+            
+        except Exception as e:
+            self.error_occurred.emit(f"공급처 필터링 오류: {str(e)}")
+            return False
+    
+    def get_current_supplier(self) -> Optional[str]:
+        """
+        현재 선택된 공급처 반환
+        
+        Returns:
+            현재 공급처명 또는 None (전체)
+        """
+        return self._current_supplier
+    
+    def store_original_data(self):
+        """
+        현재 df를 원본 데이터로 저장 (엑셀 로드 직후 호출)
+        """
+        if self.df is not None:
+            self._df_original = self.df.copy()
+    
+    def get_filtered_order_count(self) -> int:
+        """
+        현재 필터링된 데이터의 주문 수
+        
+        Returns:
+            주문(송장) 수
+        """
+        if self.df is None:
+            return 0
+        return self.df['tracking_no'].nunique()
+    
+    def get_total_order_count(self) -> int:
+        """
+        전체 데이터의 주문 수
+        
+        Returns:
+            전체 주문(송장) 수
+        """
+        df = self._df_original if self._df_original is not None else self.df
+        if df is None:
+            return 0
+        return df['tracking_no'].nunique()
 
