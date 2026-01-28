@@ -4,6 +4,7 @@ Windows os.startfile 방식으로 클릭 없이 기본 프린터로 인쇄
 PDF 내용에서 송장번호를 찾아서 해당 페이지만 출력 지원
 """
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
@@ -125,7 +126,6 @@ class PDFPrinter(QObject):
         
         for pdf_path in pdf_files:
             try:
-                import re
                 # 송장번호 패턴 매칭 (다양한 형식 지원)
                 # 하이픈, 공백, 다양한 변형 모두 지원
                 patterns = [
@@ -458,7 +458,6 @@ class PDFPrinter(QObject):
         total_pages = 0
         
         try:
-            import re
             # 첫 번째 PDF와 동일한 패턴 사용
             patterns = [
                 r'등기번호[:\s\-]*([0-9]{5}[-–—\s]{0,2}\d{4}[-–—\s]{0,2}\d{4})',
@@ -551,7 +550,6 @@ class PDFPrinter(QObject):
         self.print_success.emit(f"⚠️ 요청된 송장번호: {tracking_no}, 매핑된 페이지: {page_num + 1}")
         
         try:
-            import re
             # 파일명에 사용할 수 있도록 하이픈 제거
             clean_tracking_no = re.sub(r'[-–—\s]', '', tracking_no)
             
@@ -706,7 +704,6 @@ class PDFPrinter(QObject):
         self.print_success.emit(f"[주문서] 페이지 추출 시작: {tracking_no} → {pdf_path.name} 페이지 {page_num + 1}")
         
         try:
-            import re
             clean_tracking_no = re.sub(r'[-–—\s]', '', tracking_no)
             
             doc = fitz.open(str(pdf_path))
@@ -839,9 +836,6 @@ class PDFPrinter(QObject):
             tracking_no: 송장번호
             is_second: True면 두 번째 PDF 출력, False면 첫 번째 PDF 출력
         """
-        
-        import re
-        
         # 하이픈 제거한 버전으로 정규화
         clean_tracking_no = re.sub(r'[-–—\s]', '', tracking_no)
         
@@ -871,9 +865,9 @@ class PDFPrinter(QObject):
         
         # 디버깅: 전체 인덱스 매핑 상태 확인 (송장번호 → 페이지)
         mapping_info = []
-        for key, (pdf_file_path, page_num) in tracking_index.items():
+        for key, (pdf_file_path, p_num) in tracking_index.items():
             if len(key) >= 10:  # 송장번호만 (너무 짧은 키 제외)
-                mapping_info.append(f"{key}→페이지{page_num + 1}")
+                mapping_info.append(f"{key}→페이지{p_num + 1}")
         
         if mapping_info:
             sample_mappings = mapping_info[:8]  # 처음 8개만

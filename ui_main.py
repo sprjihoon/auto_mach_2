@@ -1089,6 +1089,7 @@ class MainWindow(QMainWindow):
         
         # 로드 버튼
         self.load_btn = QPushButton("불러오기")
+        self.load_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         self.load_btn.clicked.connect(self._on_load_excel)
         layout.addWidget(self.load_btn)
         
@@ -2171,20 +2172,16 @@ class MainWindow(QMainWindow):
     
     @Slot()
     def _on_browse_save_path(self):
-        """저장 경로 선택"""
-        file_path, _ = QFileDialog.getSaveFileName(
+        """저장 경로 선택 (폴더 선택)"""
+        folder_path = QFileDialog.getExistingDirectory(
             self,
-            "엑셀 저장 위치 선택",
-            "",
-            "Excel Files (*.xlsx);;All Files (*)"
+            "엑셀 저장 폴더 선택",
+            self.save_path_edit.text() or ""
         )
         
-        if file_path:
-            # .xlsx 확장자 보장
-            if not file_path.lower().endswith('.xlsx'):
-                file_path += '.xlsx'
-            self.save_path_edit.setText(file_path)
-            self._add_log(f"저장 위치 설정: {file_path}")
+        if folder_path:
+            self.save_path_edit.setText(folder_path)
+            self._add_log(f"저장 폴더 설정: {folder_path}")
     
     @Slot()
     def _on_browse_label_folder(self):
