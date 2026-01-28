@@ -21,6 +21,10 @@ import pandas as pd
 from models import ScanResult, ScanEvent
 from excel_loader import ExcelLoader
 from normalize_pdf import normalize_pdf
+from mode_manager import ModeManager, WorkMode, FullPickState
+from device_registry import DeviceRegistry
+from esp32_transport import Esp32Transport
+from full_pick_engine import FullPickEngine
 
 
 class SummaryDialog(QDialog):
@@ -606,6 +610,22 @@ class MainWindow(QMainWindow):
         from priority_engine import get_default_rules
         self.processor.set_priority_rules(get_default_rules())
         
+        # ===== 전체피킹 모드 관련 모듈 초기화 =====
+        # 모드 관리자
+        self.mode_manager = ModeManager()
+        
+        # ESP32 장치 레지스트리
+        self.device_registry = DeviceRegistry()
+        
+        # ESP32 WebSocket 서버
+        self.esp32_transport = Esp32Transport()
+        
+        # 전체피킹 엔진
+        self.full_pick_engine = FullPickEngine(
+            device_registry=self.device_registry,
+            esp32_transport=self.esp32_transport
+        )
+        
         # UI 초기화
         self._init_ui()
         self._connect_signals()
@@ -648,6 +668,10 @@ class MainWindow(QMainWindow):
         # 재출력 탭
         self.reprint_tab = self._create_reprint_tab()
         self.tab_widget.addTab(self.reprint_tab, "재출력")
+        
+        # 전체피킹 탭 (신규)
+        self.fullpick_tab = self._create_fullpick_tab()
+        self.tab_widget.addTab(self.fullpick_tab, "🚀 전체피킹")
         
         main_layout.addWidget(self.tab_widget, 1)
         
@@ -824,6 +848,460 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         
         return tab
+    
+    def _create_fullpick_tab(self) -> QWidget:
+        """전체피킹 탭 생성"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # ===== 상단: 모드 및 서버 상태 =====
+        top_layout = QHBoxLayout()
+        
+        # 모드 표시
+        mode_group = QGroupBox("🎯 현재 모드")
+        mode_layout = QHBoxLayout(mode_group)
+        self.fp_mode_label = QLabel("전체피킹 (FULL_PICK)")
+        self.fp_mode_label.setFont(QFont("Arial", 14, QFont.Bold))
+        self.fp_mode_label.setStyleSheet("color: #9C27B0;")  # 보라색
+        mode_layout.addWidget(self.fp_mode_label)
+        top_layout.addWidget(mode_group)
+        
+        # ESP32 서버 상태
+        server_group = QGroupBox("📡 ESP32 서버")
+        server_layout = QHBoxLayout(server_group)
+        
+        self.fp_server_status = QLabel("⚫ 중지됨")
+        self.fp_server_status.setMinimumWidth(120)
+        server_layout.addWidget(self.fp_server_status)
+        
+        self.fp_server_btn = QPushButton("서버 시작")
+        self.fp_server_btn.clicked.connect(self._on_fp_toggle_server)
+        server_layout.addWidget(self.fp_server_btn)
+        
+        self.fp_device_count = QLabel("연결: 0대")
+        server_layout.addWidget(self.fp_device_count)
+        
+        top_layout.addWidget(server_group)
+        
+        # 상태
+        state_group = QGroupBox("📊 상태")
+        state_layout = QHBoxLayout(state_group)
+        self.fp_state_label = QLabel("SKU 스캔 대기")
+        self.fp_state_label.setFont(QFont("Arial", 12))
+        state_layout.addWidget(self.fp_state_label)
+        top_layout.addWidget(state_group)
+        
+        layout.addLayout(top_layout)
+        
+        # ===== 중단: SKU 스캔 및 BIN 목록 =====
+        main_splitter = QSplitter(Qt.Horizontal)
+        
+        # 왼쪽: SKU 스캔 영역
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # SKU 스캔 입력
+        scan_group = QGroupBox("📦 SKU 스캔")
+        scan_layout = QVBoxLayout(scan_group)
+        
+        scan_row = QHBoxLayout()
+        self.fp_sku_input = QLineEdit()
+        self.fp_sku_input.setPlaceholderText("SKU 바코드 스캔 또는 입력")
+        self.fp_sku_input.setFont(QFont("Arial", 14))
+        self.fp_sku_input.setMinimumHeight(50)
+        self.fp_sku_input.returnPressed.connect(self._on_fp_sku_scan)
+        scan_row.addWidget(self.fp_sku_input)
+        
+        self.fp_scan_btn = QPushButton("스캔")
+        self.fp_scan_btn.setMinimumHeight(50)
+        self.fp_scan_btn.setMinimumWidth(80)
+        self.fp_scan_btn.clicked.connect(self._on_fp_sku_scan)
+        scan_row.addWidget(self.fp_scan_btn)
+        
+        scan_layout.addLayout(scan_row)
+        
+        # 현재 SKU 정보
+        self.fp_current_sku = QLabel("현재 SKU: -")
+        self.fp_current_sku.setFont(QFont("Arial", 12, QFont.Bold))
+        scan_layout.addWidget(self.fp_current_sku)
+        
+        self.fp_total_qty = QLabel("총 수량: 0개")
+        self.fp_total_qty.setFont(QFont("Arial", 11))
+        scan_layout.addWidget(self.fp_total_qty)
+        
+        left_layout.addWidget(scan_group)
+        
+        # 진행 상황
+        progress_group = QGroupBox("📈 진행 상황")
+        progress_layout = QVBoxLayout(progress_group)
+        
+        self.fp_progress_label = QLabel("완료: 0 / 0 BIN")
+        self.fp_progress_label.setFont(QFont("Arial", 12))
+        progress_layout.addWidget(self.fp_progress_label)
+        
+        self.fp_completed_qty = QLabel("피킹 완료: 0개 / 0개")
+        self.fp_completed_qty.setFont(QFont("Arial", 11))
+        progress_layout.addWidget(self.fp_completed_qty)
+        
+        # 취소 버튼
+        self.fp_cancel_btn = QPushButton("❌ 현재 SKU 취소")
+        self.fp_cancel_btn.setMinimumHeight(40)
+        self.fp_cancel_btn.setEnabled(False)
+        self.fp_cancel_btn.clicked.connect(self._on_fp_cancel_session)
+        progress_layout.addWidget(self.fp_cancel_btn)
+        
+        left_layout.addWidget(progress_group)
+        left_layout.addStretch()
+        
+        main_splitter.addWidget(left_widget)
+        
+        # 오른쪽: BIN 목록
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        bin_group = QGroupBox("🗃️ BIN 피킹 목록")
+        bin_layout = QVBoxLayout(bin_group)
+        
+        # BIN 테이블
+        self.fp_bin_table = QTableWidget()
+        self.fp_bin_table.setColumnCount(4)
+        self.fp_bin_table.setHorizontalHeaderLabels(["BIN", "수량", "상태", "완료"])
+        self.fp_bin_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.fp_bin_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.fp_bin_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.fp_bin_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.fp_bin_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.fp_bin_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.fp_bin_table.setMinimumHeight(300)
+        bin_layout.addWidget(self.fp_bin_table)
+        
+        # 수동 완료 버튼
+        manual_row = QHBoxLayout()
+        self.fp_manual_complete_btn = QPushButton("✅ 선택 BIN 수동 완료")
+        self.fp_manual_complete_btn.setMinimumHeight(40)
+        self.fp_manual_complete_btn.setEnabled(False)
+        self.fp_manual_complete_btn.clicked.connect(self._on_fp_manual_complete)
+        manual_row.addWidget(self.fp_manual_complete_btn)
+        bin_layout.addLayout(manual_row)
+        
+        right_layout.addWidget(bin_group)
+        
+        main_splitter.addWidget(right_widget)
+        main_splitter.setSizes([400, 500])
+        
+        layout.addWidget(main_splitter, 1)
+        
+        # ===== 하단: 로그 =====
+        log_group = QGroupBox("📝 로그")
+        log_layout = QVBoxLayout(log_group)
+        
+        self.fp_log = QTextEdit()
+        self.fp_log.setReadOnly(True)
+        self.fp_log.setMaximumHeight(150)
+        self.fp_log.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4; font-family: Consolas;")
+        log_layout.addWidget(self.fp_log)
+        
+        layout.addWidget(log_group)
+        
+        # ===== ESP32 장치 관리 =====
+        device_group = QGroupBox("🔌 ESP32 장치 관리")
+        device_group.setMaximumHeight(120)
+        device_layout = QHBoxLayout(device_group)
+        
+        # 연결된 장치 목록
+        self.fp_device_list = QListWidget()
+        self.fp_device_list.setMaximumHeight(80)
+        device_layout.addWidget(self.fp_device_list)
+        
+        # 장치 관리 버튼
+        device_btn_layout = QVBoxLayout()
+        self.fp_refresh_devices_btn = QPushButton("새로고침")
+        self.fp_refresh_devices_btn.clicked.connect(self._on_fp_refresh_devices)
+        device_btn_layout.addWidget(self.fp_refresh_devices_btn)
+        
+        self.fp_clear_bindings_btn = QPushButton("바인딩 초기화")
+        self.fp_clear_bindings_btn.clicked.connect(self._on_fp_clear_bindings)
+        device_btn_layout.addWidget(self.fp_clear_bindings_btn)
+        
+        device_layout.addLayout(device_btn_layout)
+        
+        layout.addWidget(device_group)
+        
+        # ===== 시그널 연결 =====
+        self._connect_fullpick_signals()
+        
+        return tab
+    
+    def _connect_fullpick_signals(self):
+        """전체피킹 시그널 연결"""
+        # 전체피킹 엔진 시그널
+        self.full_pick_engine.session_started.connect(self._on_fp_session_started)
+        self.full_pick_engine.bin_list_ready.connect(self._on_fp_bin_list_ready)
+        self.full_pick_engine.bin_completed.connect(self._on_fp_bin_completed)
+        self.full_pick_engine.session_completed.connect(self._on_fp_session_completed)
+        self.full_pick_engine.state_changed.connect(self._on_fp_state_changed)
+        self.full_pick_engine.error_occurred.connect(self._on_fp_error)
+        self.full_pick_engine.log_message.connect(self._add_fp_log)
+        
+        # ESP32 서버 시그널
+        self.esp32_transport.device_hello.connect(self._on_fp_device_hello)
+        self.esp32_transport.device_disconnected.connect(self._on_fp_device_disconnected)
+        self.esp32_transport.server_started.connect(self._on_fp_server_started)
+        self.esp32_transport.server_stopped.connect(self._on_fp_server_stopped)
+    
+    def _add_fp_log(self, message: str):
+        """전체피킹 로그 추가"""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.fp_log.append(f"[{timestamp}] {message}")
+    
+    @Slot()
+    def _on_fp_toggle_server(self):
+        """ESP32 서버 시작/중지"""
+        if self.esp32_transport.is_running:
+            self.esp32_transport.stop()
+        else:
+            if self.esp32_transport.start():
+                self._add_fp_log("ESP32 WebSocket 서버 시작 시도...")
+            else:
+                self._add_fp_log("[오류] 서버 시작 실패")
+                QMessageBox.warning(self, "오류", "ESP32 서버 시작 실패\nwebsockets 패키지가 설치되어 있는지 확인하세요.")
+    
+    @Slot(int)
+    def _on_fp_server_started(self, port: int):
+        """서버 시작 완료"""
+        self.fp_server_status.setText(f"🟢 실행중 (:{port})")
+        self.fp_server_status.setStyleSheet("color: green;")
+        self.fp_server_btn.setText("서버 중지")
+        self._add_fp_log(f"ESP32 WebSocket 서버 시작: 포트 {port}")
+    
+    @Slot()
+    def _on_fp_server_stopped(self):
+        """서버 중지"""
+        self.fp_server_status.setText("⚫ 중지됨")
+        self.fp_server_status.setStyleSheet("color: gray;")
+        self.fp_server_btn.setText("서버 시작")
+        self._add_fp_log("ESP32 서버 중지됨")
+    
+    @Slot(str)
+    def _on_fp_device_hello(self, device_id: str):
+        """ESP32 장치 연결"""
+        # 장치 등록
+        self.device_registry.register_device(device_id)
+        
+        # 자동 바인딩
+        bin_id = self.device_registry.auto_bind_device(device_id)
+        if bin_id:
+            # 바인딩 명령 전송
+            self.esp32_transport.send_bind(device_id, bin_id)
+            self._add_fp_log(f"장치 연결 및 바인딩: {device_id} → {bin_id}")
+        else:
+            self._add_fp_log(f"장치 연결: {device_id}")
+        
+        self._update_fp_device_list()
+    
+    @Slot(str)
+    def _on_fp_device_disconnected(self, device_id: str):
+        """ESP32 장치 연결 해제"""
+        self.device_registry.unregister_device(device_id)
+        self._add_fp_log(f"장치 연결 해제: {device_id}")
+        self._update_fp_device_list()
+    
+    def _update_fp_device_list(self):
+        """장치 목록 업데이트"""
+        self.fp_device_list.clear()
+        
+        for device in self.device_registry.get_all_devices():
+            status = "🟢" if device.connected else "🔴"
+            bin_text = device.bin_id or "미할당"
+            item = QListWidgetItem(f"{status} {device.device_id} → {bin_text}")
+            self.fp_device_list.addItem(item)
+        
+        self.fp_device_count.setText(f"연결: {self.device_registry.connected_count}대")
+    
+    @Slot()
+    def _on_fp_refresh_devices(self):
+        """장치 목록 새로고침"""
+        self._update_fp_device_list()
+    
+    @Slot()
+    def _on_fp_clear_bindings(self):
+        """모든 바인딩 초기화"""
+        self.device_registry.clear_all_bindings()
+        self._update_fp_device_list()
+        self._add_fp_log("모든 장치 바인딩 초기화됨")
+    
+    @Slot()
+    def _on_fp_sku_scan(self):
+        """SKU 스캔 처리"""
+        barcode = self.fp_sku_input.text().strip()
+        if not barcode:
+            return
+        
+        # 데이터 소스 설정
+        if self.excel_loader.df is not None:
+            self.full_pick_engine.set_data_source(self.excel_loader.df, self.bin_manager)
+        else:
+            QMessageBox.warning(self, "경고", "먼저 출고 탭에서 엑셀 파일을 불러오세요.")
+            return
+        
+        # 스캔 처리
+        self.full_pick_engine.process_scan(barcode)
+        
+        # 입력 필드 초기화
+        self.fp_sku_input.clear()
+        self.fp_sku_input.setFocus()
+    
+    @Slot(str, int)
+    def _on_fp_session_started(self, barcode: str, total_qty: int):
+        """피킹 세션 시작"""
+        self.fp_current_sku.setText(f"현재 SKU: {barcode}")
+        self.fp_total_qty.setText(f"총 수량: {total_qty}개")
+        self.fp_cancel_btn.setEnabled(True)
+        self.fp_manual_complete_btn.setEnabled(True)
+        self._add_fp_log(f"피킹 시작: {barcode} (총 {total_qty}개)")
+    
+    @Slot(list)
+    def _on_fp_bin_list_ready(self, bin_list: list):
+        """BIN 목록 표시"""
+        self.fp_bin_table.setRowCount(len(bin_list))
+        
+        for row, (bin_id, qty) in enumerate(bin_list):
+            # BIN ID
+            bin_item = QTableWidgetItem(bin_id)
+            bin_item.setTextAlignment(Qt.AlignCenter)
+            bin_item.setFont(QFont("Arial", 12, QFont.Bold))
+            self.fp_bin_table.setItem(row, 0, bin_item)
+            
+            # 수량
+            qty_item = QTableWidgetItem(str(qty))
+            qty_item.setTextAlignment(Qt.AlignCenter)
+            qty_item.setFont(QFont("Arial", 14, QFont.Bold))
+            qty_item.setBackground(QColor("#E1BEE7"))  # 연보라
+            self.fp_bin_table.setItem(row, 1, qty_item)
+            
+            # 상태
+            status_item = QTableWidgetItem("대기")
+            status_item.setTextAlignment(Qt.AlignCenter)
+            self.fp_bin_table.setItem(row, 2, status_item)
+            
+            # 완료 버튼
+            complete_btn = QPushButton("완료")
+            complete_btn.setProperty("bin_id", bin_id)
+            complete_btn.clicked.connect(lambda checked, b=bin_id: self._on_fp_bin_button_clicked(b))
+            self.fp_bin_table.setCellWidget(row, 3, complete_btn)
+        
+        self._update_fp_progress()
+    
+    def _on_fp_bin_button_clicked(self, bin_id: str):
+        """BIN 완료 버튼 클릭"""
+        self.full_pick_engine.complete_bin(bin_id)
+    
+    @Slot(str, int)
+    def _on_fp_bin_completed(self, bin_id: str, qty: int):
+        """BIN 완료"""
+        # 테이블에서 해당 BIN 찾아서 상태 업데이트
+        for row in range(self.fp_bin_table.rowCount()):
+            item = self.fp_bin_table.item(row, 0)
+            if item and item.text() == bin_id:
+                # 상태 업데이트
+                status_item = self.fp_bin_table.item(row, 2)
+                if status_item:
+                    status_item.setText("✅ 완료")
+                    status_item.setBackground(QColor("#C8E6C9"))  # 연녹색
+                
+                # 버튼 비활성화
+                btn = self.fp_bin_table.cellWidget(row, 3)
+                if btn:
+                    btn.setEnabled(False)
+                break
+        
+        self._update_fp_progress()
+        self._add_fp_log(f"BIN 완료: {bin_id} ({qty}개)")
+    
+    @Slot(str, int)
+    def _on_fp_session_completed(self, barcode: str, total_qty: int):
+        """피킹 세션 완료"""
+        self.fp_current_sku.setText("현재 SKU: - (완료)")
+        self.fp_cancel_btn.setEnabled(False)
+        self.fp_manual_complete_btn.setEnabled(False)
+        self._add_fp_log(f"SKU 피킹 완료: {barcode} (총 {total_qty}개)")
+        
+        QMessageBox.information(
+            self,
+            "피킹 완료",
+            f"SKU 피킹이 완료되었습니다.\n\n"
+            f"SKU: {barcode}\n"
+            f"총 수량: {total_qty}개"
+        )
+    
+    @Slot(object)
+    def _on_fp_state_changed(self, state: FullPickState):
+        """상태 변경"""
+        state_names = {
+            FullPickState.IDLE: "대기",
+            FullPickState.WAIT_SKU_SCAN: "SKU 스캔 대기",
+            FullPickState.BIN_ACTIVE: "피킹 진행중",
+            FullPickState.BIN_DONE: "BIN 완료",
+            FullPickState.SKU_DONE: "SKU 완료"
+        }
+        self.fp_state_label.setText(state_names.get(state, "알 수 없음"))
+    
+    @Slot(str)
+    def _on_fp_error(self, message: str):
+        """오류 발생"""
+        self._add_fp_log(f"[오류] {message}")
+        QMessageBox.warning(self, "오류", message)
+    
+    def _update_fp_progress(self):
+        """진행 상황 업데이트"""
+        session = self.full_pick_engine.current_session
+        if session:
+            self.fp_progress_label.setText(
+                f"완료: {session.completed_bins} / {session.total_bins} BIN"
+            )
+            self.fp_completed_qty.setText(
+                f"피킹 완료: {session.completed_qty}개 / {session.total_qty}개"
+            )
+        else:
+            self.fp_progress_label.setText("완료: 0 / 0 BIN")
+            self.fp_completed_qty.setText("피킹 완료: 0개 / 0개")
+    
+    @Slot()
+    def _on_fp_cancel_session(self):
+        """현재 세션 취소"""
+        if self.full_pick_engine.current_session:
+            reply = QMessageBox.question(
+                self,
+                "세션 취소",
+                "현재 진행중인 피킹을 취소하시겠습니까?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.full_pick_engine.cancel_session()
+                self.fp_bin_table.setRowCount(0)
+                self.fp_current_sku.setText("현재 SKU: -")
+                self.fp_total_qty.setText("총 수량: 0개")
+                self._update_fp_progress()
+                self._add_fp_log("피킹 세션 취소됨")
+    
+    @Slot()
+    def _on_fp_manual_complete(self):
+        """선택된 BIN 수동 완료"""
+        selected = self.fp_bin_table.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "경고", "완료할 BIN을 선택해주세요.")
+            return
+        
+        row = selected[0].row()
+        bin_item = self.fp_bin_table.item(row, 0)
+        if bin_item:
+            bin_id = bin_item.text()
+            self.full_pick_engine.complete_bin(bin_id)
     
     @Slot()
     def _on_reprint_search(self):
