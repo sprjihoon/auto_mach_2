@@ -832,13 +832,13 @@ class ExcelLoader(QObject):
         
         return summary
     
-    def filter_by_supplier(self, supplier: str) -> bool:
+    def filter_by_supplier(self, suppliers) -> bool:
         """
-        특정 공급처로 데이터 필터링
+        특정 공급처(들)로 데이터 필터링
         필터링 후 self.df는 해당 공급처 데이터만 포함
         
         Args:
-            supplier: 공급처명 (None이면 전체 데이터)
+            suppliers: 공급처명 또는 공급처명 리스트 (None이면 전체 데이터)
         
         Returns:
             성공 여부
@@ -847,15 +847,20 @@ class ExcelLoader(QObject):
             return False
         
         try:
-            if supplier is None or supplier == "" or supplier == "전체":
+            # 문자열이면 리스트로 변환
+            if isinstance(suppliers, str):
+                suppliers = [suppliers] if suppliers and suppliers != "전체" else None
+            
+            if suppliers is None or len(suppliers) == 0:
                 # 전체 데이터 사용
                 self.df = self._df_original.copy()
-                self._current_supplier = None
+                self._current_suppliers = None
             else:
-                # 해당 공급처만 필터링
-                mask = self._df_original['supplier'].astype(str).str.strip() == supplier
+                # 선택한 공급처들만 필터링
+                supplier_values = self._df_original['supplier'].astype(str).str.strip()
+                mask = supplier_values.isin(suppliers)
                 self.df = self._df_original[mask].copy()
-                self._current_supplier = supplier
+                self._current_suppliers = suppliers
             
             # 메타데이터 캐시 초기화
             self._metadata_cache = None
@@ -869,12 +874,25 @@ class ExcelLoader(QObject):
     
     def get_current_supplier(self) -> Optional[str]:
         """
-        현재 선택된 공급처 반환
+        현재 선택된 공급처 반환 (단일 또는 첫 번째)
         
         Returns:
             현재 공급처명 또는 None (전체)
         """
-        return self._current_supplier
+        if hasattr(self, '_current_suppliers') and self._current_suppliers:
+            if len(self._current_suppliers) == 1:
+                return self._current_suppliers[0]
+            return f"{len(self._current_suppliers)}개 업체"
+        return getattr(self, '_current_supplier', None)
+    
+    def get_current_suppliers(self) -> Optional[List[str]]:
+        """
+        현재 선택된 공급처 리스트 반환
+        
+        Returns:
+            현재 공급처명 리스트 또는 None (전체)
+        """
+        return getattr(self, '_current_suppliers', None)
     
     def store_original_data(self):
         """
@@ -882,6 +900,7 @@ class ExcelLoader(QObject):
         """
         if self.df is not None:
             self._df_original = self.df.copy()
+            self._current_suppliers = None
     
     def get_filtered_order_count(self) -> int:
         """

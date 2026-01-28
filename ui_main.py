@@ -191,18 +191,20 @@ from bin_manager import BinManager
 
 
 class SupplierSelectDialog(QDialog):
-    """업체(공급처) 선택 다이얼로그"""
+    """업체(공급처) 선택 다이얼로그 - 다중 선택 지원"""
     
-    def __init__(self, supplier_summary: list, parent=None):
+    def __init__(self, supplier_summary: list, parent=None, current_suppliers: list = None):
         """
         Args:
             supplier_summary: [{"supplier": "업체A", "order_count": 10, "item_count": 50}, ...]
+            current_suppliers: 현재 선택된 업체 리스트 (업체 변경 시 사용)
         """
         super().__init__(parent)
         self.supplier_summary = supplier_summary
-        self.selected_supplier = None
+        self.selected_suppliers = []  # 다중 선택 지원
+        self.current_suppliers = current_suppliers or []
         self.setWindowTitle("🏢 업체 선택")
-        self.setMinimumSize(500, 400)
+        self.setMinimumSize(550, 450)
         self._init_ui()
     
     def _init_ui(self):
@@ -210,22 +212,36 @@ class SupplierSelectDialog(QDialog):
         layout.setSpacing(15)
         
         # 헤더
-        header = QLabel("<h2>🏢 업체를 선택하세요</h2>")
+        header = QLabel("<h2>🏢 작업할 업체를 선택하세요</h2>")
         header.setAlignment(Qt.AlignCenter)
         layout.addWidget(header)
         
         # 설명
         desc = QLabel(
-            "엑셀 파일에 여러 업체(공급처)의 데이터가 포함되어 있습니다.\n"
-            "작업할 업체를 선택해주세요."
+            "여러 업체를 선택하면 동일한 BIN 시스템을 공유합니다.\n"
+            "선택한 업체들의 SKU가 같은 BIN에 배정됩니다."
         )
         desc.setStyleSheet("color: #666; padding: 10px; background: #f5f5f5; border-radius: 5px;")
         desc.setWordWrap(True)
         desc.setAlignment(Qt.AlignCenter)
         layout.addWidget(desc)
         
-        # 업체 목록 (라디오 버튼)
-        list_group = QGroupBox("업체 목록")
+        # 전체 선택/해제 버튼
+        select_btn_layout = QHBoxLayout()
+        
+        select_all_btn = QPushButton("✅ 전체 선택")
+        select_all_btn.clicked.connect(self._select_all)
+        select_btn_layout.addWidget(select_all_btn)
+        
+        deselect_all_btn = QPushButton("⬜ 전체 해제")
+        deselect_all_btn.clicked.connect(self._deselect_all)
+        select_btn_layout.addWidget(deselect_all_btn)
+        
+        select_btn_layout.addStretch()
+        layout.addLayout(select_btn_layout)
+        
+        # 업체 목록 (체크박스 - 다중 선택)
+        list_group = QGroupBox("업체 목록 (여러 업체 선택 가능)")
         list_layout = QVBoxLayout(list_group)
         
         # 스크롤 영역
@@ -237,17 +253,13 @@ class SupplierSelectDialog(QDialog):
         scroll_layout = QVBoxLayout(scroll_widget)
         scroll_layout.setSpacing(8)
         
-        self.supplier_group = QButtonGroup(self)
-        
-        # 전체 옵션 추가
+        # 총계 표시
         total_orders = sum(s["order_count"] for s in self.supplier_summary)
         total_items = sum(s["item_count"] for s in self.supplier_summary)
         
-        all_radio = QRadioButton(f"전체 ({len(self.supplier_summary)}개 업체, {total_orders}건, {total_items}개)")
-        all_radio.setStyleSheet("font-weight: bold; font-size: 13px; padding: 8px;")
-        all_radio.setProperty("supplier", "전체")
-        self.supplier_group.addButton(all_radio)
-        scroll_layout.addWidget(all_radio)
+        total_label = QLabel(f"📊 전체: {len(self.supplier_summary)}개 업체, {total_orders}건, {total_items}개")
+        total_label.setStyleSheet("font-weight: bold; font-size: 12px; color: #2196F3; padding: 5px; background: #E3F2FD; border-radius: 3px;")
+        scroll_layout.addWidget(total_label)
         
         # 구분선
         line = QFrame()
@@ -255,23 +267,41 @@ class SupplierSelectDialog(QDialog):
         line.setStyleSheet("background-color: #ddd;")
         scroll_layout.addWidget(line)
         
-        # 각 업체별 라디오 버튼
+        # 각 업체별 체크박스
+        self.supplier_checkboxes = []
         for idx, item in enumerate(self.supplier_summary):
             supplier = item["supplier"]
             order_count = item["order_count"]
             item_count = item["item_count"]
             
-            radio = QRadioButton(f"{supplier}  ({order_count}건, {item_count}개)")
-            radio.setStyleSheet("font-size: 12px; padding: 6px;")
-            radio.setProperty("supplier", supplier)
-            self.supplier_group.addButton(radio)
-            scroll_layout.addWidget(radio)
+            checkbox = QCheckBox(f"{supplier}  ({order_count}건, {item_count}개)")
+            checkbox.setStyleSheet("font-size: 12px; padding: 6px;")
+            checkbox.setProperty("supplier", supplier)
+            checkbox.setProperty("order_count", order_count)
+            checkbox.setProperty("item_count", item_count)
+            checkbox.stateChanged.connect(self._update_selection_summary)
+            
+            # 현재 선택된 업체면 체크
+            if supplier in self.current_suppliers or not self.current_suppliers:
+                checkbox.setChecked(not self.current_suppliers)  # 처음이면 전부 미체크
+            if supplier in self.current_suppliers:
+                checkbox.setChecked(True)
+            
+            self.supplier_checkboxes.append(checkbox)
+            scroll_layout.addWidget(checkbox)
         
         scroll_layout.addStretch()
         scroll.setWidget(scroll_widget)
         list_layout.addWidget(scroll)
         
         layout.addWidget(list_group, 1)
+        
+        # 선택 요약 표시
+        self.selection_summary = QLabel("선택: 0개 업체, 0건, 0개")
+        self.selection_summary.setStyleSheet("font-weight: bold; padding: 8px; background: #FFF3E0; border-radius: 5px;")
+        self.selection_summary.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.selection_summary)
+        self._update_selection_summary()
         
         # 버튼 영역
         btn_layout = QHBoxLayout()
@@ -282,26 +312,71 @@ class SupplierSelectDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
         
-        select_btn = QPushButton("선택")
-        select_btn.setMinimumWidth(100)
+        select_btn = QPushButton("선택 완료")
+        select_btn.setMinimumWidth(120)
         select_btn.setStyleSheet("background: #4CAF50; color: white; font-weight: bold;")
         select_btn.clicked.connect(self._on_select)
         btn_layout.addWidget(select_btn)
         
         layout.addLayout(btn_layout)
     
+    def _select_all(self):
+        """전체 선택"""
+        for cb in self.supplier_checkboxes:
+            cb.setChecked(True)
+    
+    def _deselect_all(self):
+        """전체 해제"""
+        for cb in self.supplier_checkboxes:
+            cb.setChecked(False)
+    
+    def _update_selection_summary(self):
+        """선택 요약 업데이트"""
+        selected_count = 0
+        selected_orders = 0
+        selected_items = 0
+        
+        for cb in self.supplier_checkboxes:
+            if cb.isChecked():
+                selected_count += 1
+                selected_orders += cb.property("order_count")
+                selected_items += cb.property("item_count")
+        
+        if selected_count == 0:
+            self.selection_summary.setText("⚠️ 선택된 업체가 없습니다")
+            self.selection_summary.setStyleSheet("font-weight: bold; padding: 8px; background: #FFCDD2; border-radius: 5px; color: #C62828;")
+        elif selected_count == len(self.supplier_checkboxes):
+            self.selection_summary.setText(f"✅ 전체 선택: {selected_count}개 업체, {selected_orders}건, {selected_items}개")
+            self.selection_summary.setStyleSheet("font-weight: bold; padding: 8px; background: #C8E6C9; border-radius: 5px; color: #2E7D32;")
+        else:
+            self.selection_summary.setText(f"📦 선택: {selected_count}개 업체, {selected_orders}건, {selected_items}개")
+            self.selection_summary.setStyleSheet("font-weight: bold; padding: 8px; background: #FFF3E0; border-radius: 5px; color: #E65100;")
+    
     def _on_select(self):
         """업체 선택 확정"""
-        checked_btn = self.supplier_group.checkedButton()
-        if checked_btn:
-            self.selected_supplier = checked_btn.property("supplier")
-            self.accept()
-        else:
-            QMessageBox.warning(self, "경고", "업체를 선택해주세요.")
+        self.selected_suppliers = []
+        for cb in self.supplier_checkboxes:
+            if cb.isChecked():
+                self.selected_suppliers.append(cb.property("supplier"))
+        
+        if not self.selected_suppliers:
+            QMessageBox.warning(self, "경고", "최소 1개 이상의 업체를 선택해주세요.")
+            return
+        
+        self.accept()
     
+    def get_selected_suppliers(self) -> list:
+        """선택된 업체 리스트 반환"""
+        return self.selected_suppliers
+    
+    # 하위 호환성을 위해 단일 선택 메서드 유지
     def get_selected_supplier(self) -> str:
-        """선택된 업체 반환"""
-        return self.selected_supplier
+        """선택된 업체 반환 (첫 번째 또는 '전체')"""
+        if not self.selected_suppliers:
+            return None
+        if len(self.selected_suppliers) == len(self.supplier_summary):
+            return "전체"
+        return self.selected_suppliers[0] if len(self.selected_suppliers) == 1 else None
 
 
 class BinSettingsDialog(QDialog):
@@ -1963,13 +2038,19 @@ class MainWindow(QMainWindow):
                     
                     dialog = SupplierSelectDialog(supplier_summary, self)
                     if dialog.exec() == QDialog.Accepted:
-                        selected = dialog.get_selected_supplier()
-                        if selected and selected != "전체":
-                            # 선택한 업체로 필터링
-                            self.excel_loader.filter_by_supplier(selected)
-                            self._add_log(f"<b style='color:#2196F3'>[업체] '{selected}' 선택됨 - {self.excel_loader.get_filtered_order_count()}건</b>", html=True)
-                        else:
-                            self._add_log(f"[업체] 전체 업체 선택 - {self.excel_loader.get_total_order_count()}건")
+                        selected_suppliers = dialog.get_selected_suppliers()
+                        
+                        if len(selected_suppliers) == len(supplier_summary):
+                            # 전체 선택
+                            self._add_log(f"<b style='color:#2196F3'>[업체] 전체 {len(selected_suppliers)}개 업체 선택 - {self.excel_loader.get_total_order_count()}건 (동일 BIN 공유)</b>", html=True)
+                        elif len(selected_suppliers) > 1:
+                            # 다중 업체 선택 - 필터링 적용
+                            self.excel_loader.filter_by_supplier(selected_suppliers)
+                            self._add_log(f"<b style='color:#2196F3'>[업체] {len(selected_suppliers)}개 업체 선택: {', '.join(selected_suppliers)} - {self.excel_loader.get_filtered_order_count()}건 (동일 BIN 공유)</b>", html=True)
+                        elif len(selected_suppliers) == 1:
+                            # 단일 업체 선택
+                            self.excel_loader.filter_by_supplier(selected_suppliers[0])
+                            self._add_log(f"<b style='color:#2196F3'>[업체] '{selected_suppliers[0]}' 선택됨 - {self.excel_loader.get_filtered_order_count()}건</b>", html=True)
                     else:
                         # 취소 시 로드 중단
                         self._add_log("[업체] 업체 선택 취소됨 - 로드 중단")
@@ -2008,9 +2089,9 @@ class MainWindow(QMainWindow):
                      f"소량기준={bin_settings.get('min_qty_threshold', 10)}이하, "
                      f"공유BIN 최대SKU={bin_settings.get('max_sku_per_shared_bin', 5)}{dedicated_log}")
         
-        # 1) BIN 전체 리셋
+        # 1) BIN 전체 리셋 (이전 업체의 모든 BIN 배정 초기화 - BIN-01부터 다시 시작)
         self.bin_manager.reset()
-        self._add_log("[BIN] BIN 정보 리셋 완료")
+        self._add_log("<b style='color:#9C27B0'>[BIN] ✓ 모든 BIN 완전 초기화 (BIN-01부터 새로 배정)</b>", html=True)
         self._update_bin_display(["BIN 미지정"])
         
         # 제외 송장 목록 초기화 (새 작업 세션)
@@ -2075,7 +2156,7 @@ class MainWindow(QMainWindow):
     
     @Slot()
     def _on_change_supplier(self):
-        """업체(공급처) 변경"""
+        """업체(공급처) 변경 - 다중 선택 지원"""
         # 원본 데이터가 없으면 경고
         if self.excel_loader._df_original is None:
             QMessageBox.warning(self, "경고", "먼저 엑셀 파일을 불러오세요.")
@@ -2097,24 +2178,36 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "알림", "변경할 수 있는 다른 업체가 없습니다.")
             return
         
-        # 업체 선택 다이얼로그 표시
-        dialog = SupplierSelectDialog(supplier_summary, self)
+        # 현재 선택된 업체 리스트 가져오기
+        current_suppliers = self.excel_loader.get_current_suppliers() or []
+        
+        # 업체 선택 다이얼로그 표시 (현재 선택 상태 전달)
+        dialog = SupplierSelectDialog(supplier_summary, self, current_suppliers)
         if dialog.exec() == QDialog.Accepted:
-            selected = dialog.get_selected_supplier()
-            current = self.excel_loader.get_current_supplier()
+            selected_suppliers = dialog.get_selected_suppliers()
             
-            # 같은 업체 선택 시 무시
-            if selected == current or (selected == "전체" and current is None):
+            # 선택 비교 (리스트 비교)
+            if set(selected_suppliers) == set(current_suppliers):
                 self._add_log("[업체] 동일한 업체 선택됨 - 변경 없음")
                 return
             
+            # ===== BIN 완전 리셋 안내 =====
+            self._add_log(f"<b style='color:#FF5722'>━━━ 업체 변경: BIN 완전 리셋 ━━━</b>", html=True)
+            self._add_log(f"[BIN] 이전 업체의 모든 BIN 배정이 초기화됩니다.")
+            
             # 업체 변경 적용
-            if selected and selected != "전체":
-                self.excel_loader.filter_by_supplier(selected)
-                self._add_log(f"<b style='color:#FF9800'>[업체 변경] '{selected}' 선택됨 - {self.excel_loader.get_filtered_order_count()}건</b>", html=True)
-            else:
+            if len(selected_suppliers) == len(supplier_summary):
+                # 전체 선택
                 self.excel_loader.filter_by_supplier(None)
-                self._add_log(f"<b style='color:#FF9800'>[업체 변경] 전체 업체 선택 - {self.excel_loader.get_total_order_count()}건</b>", html=True)
+                self._add_log(f"<b style='color:#FF9800'>[업체 변경] 전체 {len(selected_suppliers)}개 업체 선택 - {self.excel_loader.get_total_order_count()}건</b>", html=True)
+            elif len(selected_suppliers) > 1:
+                # 다중 업체 선택
+                self.excel_loader.filter_by_supplier(selected_suppliers)
+                self._add_log(f"<b style='color:#FF9800'>[업체 변경] {len(selected_suppliers)}개 업체 선택: {', '.join(selected_suppliers)} - {self.excel_loader.get_filtered_order_count()}건</b>", html=True)
+            else:
+                # 단일 업체 선택
+                self.excel_loader.filter_by_supplier(selected_suppliers[0])
+                self._add_log(f"<b style='color:#FF9800'>[업체 변경] '{selected_suppliers[0]}' 선택됨 - {self.excel_loader.get_filtered_order_count()}건</b>", html=True)
             
             # 상태바 업데이트
             file_path = self.excel_path_edit.text().strip()
@@ -2124,8 +2217,17 @@ class MainWindow(QMainWindow):
             else:
                 self.status_file.setText(f"파일: {Path(file_path).name}")
             
-            # BIN 및 PDF 재처리
+            # BIN 완전 리셋 후 재배정 (새 업체의 SKU에 맞게 BIN-01부터 다시 시작)
             self._process_after_supplier_selection(file_path)
+            
+            QMessageBox.information(
+                self,
+                "업체 변경 완료",
+                f"업체가 변경되었습니다.\n\n"
+                f"선택 업체: {', '.join(selected_suppliers) if len(selected_suppliers) <= 3 else f'{len(selected_suppliers)}개 업체'}\n"
+                f"주문 건수: {self.excel_loader.get_filtered_order_count()}건\n\n"
+                f"⚠️ BIN이 완전히 초기화되어 새로 배정되었습니다."
+            )
             
             QMessageBox.information(
                 self,
