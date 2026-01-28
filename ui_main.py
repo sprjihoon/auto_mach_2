@@ -598,6 +598,10 @@ class MainWindow(QMainWindow):
         # 제외 송장 목록 초기화
         self._excluded_tracking_numbers: set = set()
         
+        # 작업 차수 관리 (1차, 2차 피킹 등)
+        self._work_session: int = 0  # 업체 선택/변경 시마다 증가
+        self._work_session_supplier: str = ""  # 현재 작업 차수의 업체명
+        
         # 우선순위 규칙 초기화 (기본값: 단품 우선)
         from priority_engine import get_default_rules
         self.processor.set_priority_rules(get_default_rules())
@@ -2074,6 +2078,11 @@ class MainWindow(QMainWindow):
     
     def _process_after_supplier_selection(self, file_path: str):
         """업체 선택 후 실행되는 로직 (BIN 배정, PDF 스캔 등)"""
+        # ====== 작업 차수 증가 및 업체명 저장 ======
+        self._work_session += 1
+        self._work_session_supplier = self.excel_loader.get_current_supplier() or "전체"
+        self._add_log(f"<b style='color:#673AB7'>━━━ {self._work_session}차 피킹 작업 시작 [{self._work_session_supplier}] ━━━</b>", html=True)
+        
         # ====== BIN 자동 배정 (엑셀 로드 시) ======
         # 0) BIN 설정 로드 및 적용
         bin_settings = load_bin_settings()
@@ -2274,15 +2283,21 @@ class MainWindow(QMainWindow):
         from datetime import datetime
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
+        # 작업 차수 및 업체명 (파일명에 포함)
+        session_num = self._work_session if self._work_session > 0 else 1
+        supplier_name = self._work_session_supplier or self.excel_loader.get_current_supplier() or "전체"
+        # 파일명에 사용할 수 없는 문자 제거
+        safe_supplier = supplier_name.replace("/", "_").replace("\\", "_").replace(":", "_").replace(" ", "")
+        
         # 저장 경로가 지정되어 있으면 해당 폴더에 자동 저장
         save_path = self.save_path_edit.text().strip()
         if save_path:
             # 지정된 경로의 폴더에 피킹리스트 PDF 저장
             save_dir = Path(save_path).parent
-            file_path = str(save_dir / f"피킹리스트_{timestamp}.pdf")
+            file_path = str(save_dir / f"피킹리스트_{session_num}차_{safe_supplier}_{timestamp}.pdf")
         else:
             # 파일 저장 경로 선택 (기본 파일명에 타임스탬프 포함)
-            default_name = f"피킹리스트_{timestamp}.pdf"
+            default_name = f"피킹리스트_{session_num}차_{safe_supplier}_{timestamp}.pdf"
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "제품별 요약 PDF 저장",
@@ -2393,12 +2408,46 @@ class MainWindow(QMainWindow):
                 fontSize=18,
                 alignment=1  # 중앙 정렬
             )
+            subtitle_style = ParagraphStyle(
+                'Subtitle',
+                parent=styles['Normal'],
+                fontName=font_name,
+                fontSize=12,
+                alignment=1,  # 중앙 정렬
+                textColor=colors.HexColor('#555555')
+            )
+            info_style = ParagraphStyle(
+                'Info',
+                parent=styles['Normal'],
+                fontName=font_name,
+                fontSize=10,
+                alignment=1,  # 중앙 정렬
+                textColor=colors.HexColor('#666666')
+            )
             
-            # 제목
+            # 제목 - 작업 차수 포함
             from datetime import datetime
-            title = Paragraph(f"제품별 피킹 리스트 ({datetime.now().strftime('%Y-%m-%d %H:%M')})", title_style)
+            title = Paragraph(f"<b>{session_num}차 피킹 리스트</b>", title_style)
             elements.append(title)
-            elements.append(Spacer(1, 10*mm))
+            
+            # 부제목 - 업체명 및 날짜
+            subtitle = Paragraph(f"업체: {supplier_name} | {datetime.now().strftime('%Y-%m-%d %H:%M')}", subtitle_style)
+            elements.append(subtitle)
+            elements.append(Spacer(1, 3*mm))
+            
+            # BIN 통계 정보
+            if has_bin:
+                stats = self.bin_manager.get_statistics()
+                total_bins = stats.get("total_bins", 0)
+                shared_bins = stats.get("shared_bins", 0)
+                dedicated_bins = stats.get("dedicated_bins", 0)
+                bin_info = Paragraph(
+                    f"BIN 배정: 총 {total_bins}개 (전용: {dedicated_bins}, 공유: {shared_bins}) | ★ = 공유 BIN",
+                    info_style
+                )
+                elements.append(bin_info)
+            
+            elements.append(Spacer(1, 5*mm))
             
             # 테이블 헤더 (BIN 컬럼 추가 - 첫 번째 컬럼)
             if has_location:
