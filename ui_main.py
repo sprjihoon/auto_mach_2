@@ -2147,6 +2147,18 @@ class MainWindow(QMainWindow):
         max_sku_row.addStretch()
         bin_layout.addLayout(max_sku_row)
         
+        # 중복금지 수량 (전용 BIN 임계값)
+        dedicated_qty_row = QHBoxLayout()
+        dedicated_qty_row.addWidget(QLabel("중복금지 수량:"))
+        self.settings_bin_dedicated_qty = QSpinBox()
+        self.settings_bin_dedicated_qty.setRange(0, 9999)
+        self.settings_bin_dedicated_qty.setValue(0)
+        self.settings_bin_dedicated_qty.setSuffix(" 개 이상")
+        dedicated_qty_row.addWidget(self.settings_bin_dedicated_qty)
+        dedicated_qty_row.addWidget(QLabel("(이상이면 전용 BIN, 0=비활성)"))
+        dedicated_qty_row.addStretch()
+        bin_layout.addLayout(dedicated_qty_row)
+        
         # BIN 설정 저장 버튼
         bin_btn_row = QHBoxLayout()
         bin_btn_row.addStretch()
@@ -2373,6 +2385,7 @@ class MainWindow(QMainWindow):
         self.settings_bin_max_qty.setValue(bin_settings.get("max_qty_per_bin", 100))
         self.settings_bin_min_qty.setValue(bin_settings.get("min_qty_threshold", 10))
         self.settings_bin_max_sku.setValue(bin_settings.get("max_sku_per_shared_bin", 5))
+        self.settings_bin_dedicated_qty.setValue(bin_settings.get("dedicated_qty_threshold", 0))
         
         # 저장 경로 로드
         save_path = settings.get("save_path", "")
@@ -2558,12 +2571,23 @@ class MainWindow(QMainWindow):
         max_qty = self.settings_bin_max_qty.value()
         min_qty = self.settings_bin_min_qty.value()
         max_sku = self.settings_bin_max_sku.value()
+        dedicated_qty = self.settings_bin_dedicated_qty.value()
         
         # BIN 매니저에 적용
-        self.bin_manager.set_settings(max_qty, min_qty, max_sku)
+        self.bin_manager.set_config(
+            max_qty_per_bin=max_qty,
+            min_qty_threshold=min_qty,
+            max_sku_per_shared_bin=max_sku,
+            dedicated_qty_threshold=dedicated_qty
+        )
         
         # 설정 저장
-        save_bin_settings(max_qty, min_qty, max_sku)
+        save_bin_settings(
+            max_qty_per_bin=max_qty,
+            min_qty_threshold=min_qty,
+            max_sku_per_shared_bin=max_sku,
+            dedicated_qty_threshold=dedicated_qty
+        )
         
         QMessageBox.information(self, "BIN 설정", "BIN 설정이 저장되었습니다.")
     
