@@ -61,6 +61,18 @@ class Esp32Transport(QObject):
     def __init__(self, host: str = None, port: int = None):
         super().__init__()
         
+        # 설정 파일에서 로드 (인자가 없으면)
+        if host is None or port is None:
+            try:
+                from printer_manager import load_esp32_settings
+                esp32_settings = load_esp32_settings()
+                if host is None:
+                    host = esp32_settings.get("host", self.DEFAULT_HOST)
+                if port is None:
+                    port = esp32_settings.get("port", self.DEFAULT_PORT)
+            except Exception:
+                pass
+        
         self._host = host or self.DEFAULT_HOST
         self._port = port or self.DEFAULT_PORT
         

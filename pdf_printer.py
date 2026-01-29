@@ -648,6 +648,21 @@ class PDFPrinter(QObject):
                         end_page = page_num + 1
                         self.print_success.emit(f"✓ 2장 송장 감지: 다음 페이지({page_num + 2})도 함께 출력")
             
+            # 2장 송장 시 페이지 크기 비교 - 크기가 많이 다르면 첫 페이지만 출력
+            if end_page > start_page:
+                first_page = doc[start_page]
+                second_page = doc[end_page]
+                first_rect = self._detect_content_rect(first_page)
+                second_rect = self._detect_content_rect(second_page)
+                
+                # 두 번째 페이지가 첫 번째 페이지의 60% 미만이면 건너뛰기
+                first_area = first_rect.width * first_rect.height
+                second_area = second_rect.width * second_rect.height
+                
+                if second_area < first_area * 0.6:
+                    self.print_success.emit(f"⚠️ 두 번째 페이지 크기가 첫 번째의 {second_area/first_area*100:.0f}%로 너무 작음 → 첫 페이지만 출력")
+                    end_page = start_page
+            
             # 추출할 페이지 범위 확정
             if start_page == end_page:
                 self.print_success.emit(f"📄 단일 페이지 추출: {tracking_no} (페이지 {start_page + 1}만 인쇄)")
@@ -664,6 +679,20 @@ class PDFPrinter(QObject):
             label_rotation = load_label_rotation()
             self.print_success.emit(f"회전 설정: {label_rotation}도")
             
+            # 첫 페이지 크기 기준 (모든 페이지를 이 크기로 통일)
+            first_page_for_size = doc[start_page]
+            first_clip_rect = self._detect_content_rect(first_page_for_size)
+            base_width = first_clip_rect.width
+            base_height = first_clip_rect.height
+            
+            # 회전 설정에 따른 기준 크기 계산
+            if label_rotation in [90, 270]:
+                base_rotated_width = base_height
+                base_rotated_height = base_width
+            else:
+                base_rotated_width = base_width
+                base_rotated_height = base_height
+            
             # 모든 페이지를 순회하며 추출
             for page_idx in range(start_page, end_page + 1):
                 page = doc[page_idx]
@@ -679,22 +708,20 @@ class PDFPrinter(QObject):
                 
                 # 회전 설정에 따른 크기 계산
                 if label_rotation in [90, 270]:
-                    # 90도 또는 270도 회전 시 가로/세로 교체
                     rotated_width = clip_height
                     rotated_height = clip_width
                 else:
-                    # 0도 또는 180도 회전 시 원본 크기 유지
                     rotated_width = clip_width
                     rotated_height = clip_height
                 
                 self.print_success.emit(f"📐 송장 크기: {clip_width:.1f}x{clip_height:.1f}pt → 회전 후: {rotated_width:.1f}x{rotated_height:.1f}pt")
                 
-                # 새 페이지 생성 (송장 크기, 회전 후 크기로)
-                new_page = optimized_doc.new_page(width=rotated_width, height=rotated_height)
+                # 새 페이지 생성 (첫 페이지 크기 기준으로 통일)
+                new_page = optimized_doc.new_page(width=base_rotated_width, height=base_rotated_height)
                 
                 # MediaBox와 CropBox를 동일하게 설정 (핵심!)
-                new_page.set_mediabox(fitz.Rect(0, 0, rotated_width, rotated_height))
-                new_page.set_cropbox(fitz.Rect(0, 0, rotated_width, rotated_height))
+                new_page.set_mediabox(fitz.Rect(0, 0, base_rotated_width, base_rotated_height))
+                new_page.set_cropbox(fitz.Rect(0, 0, base_rotated_width, base_rotated_height))
                 
                 # 고해상도 렌더링 (원본 영역만)
                 dpi = 300
@@ -702,8 +729,8 @@ class PDFPrinter(QObject):
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
                 
-                # 이미지를 새 페이지 전체에 삽입 (설정된 회전 적용)
-                target_rect = fitz.Rect(0, 0, rotated_width, rotated_height)
+                # 이미지를 새 페이지에 삽입 (첫 페이지 크기 기준, 회전 적용)
+                target_rect = fitz.Rect(0, 0, base_rotated_width, base_rotated_height)
                 new_page.insert_image(target_rect, pixmap=pix, rotate=label_rotation, keep_proportion=True, overlay=True)
             
             temp_path = self._temp_dir / f"{clean_tracking_no}.pdf"
@@ -835,6 +862,22 @@ class PDFPrinter(QObject):
         """
         if not self._enabled:
             self.print_error.emit("PDF 출력이 비활성화되어 있습니다")
+            return False
+        
+        # 출력 전 상태 체크
+        if not self._pdf_file and not self._labels_dir:
+            self.print_error.emit("⚠️ PDF 파일이 설정되지 않았습니다. '데이터 업로드'에서 PDF 파일을 선택하세요.")
+            return False
+        
+        if len(self._tracking_index) == 0:
+            self.print_error.emit(f"⚠️ PDF 인덱스가 비어있습니다. PDF 파일을 다시 로드하거나 '📑 PDF 재스캔' 버튼을 클릭하세요.")
+            return False
+        
+        # 프린터 설정 체크
+        settings = load_printer_settings()
+        label_printer = settings.get("label_printer")
+        if not label_printer:
+            self.print_error.emit("⚠️ 라벨 프린터가 설정되지 않았습니다. '설정' 탭에서 라벨 프린터를 선택하세요.")
             return False
         
         # 첫 번째 PDF 출력 (기존 로직)
@@ -1109,5 +1152,140 @@ def print_pdf_simple(tracking_no: str, labels_dir: str = "labels") -> bool:
         return True
     except Exception as e:
         print(f"[오류] PDF 인쇄 실패: {str(e)}")
+        return False
+
+
+def create_picking_list_pdf(df, output_path: str, sku_bin_map: dict = None) -> bool:
+    """
+    피킹리스트 PDF 생성
+    
+    Args:
+        df: 주문 데이터 DataFrame
+        output_path: 저장할 PDF 파일 경로
+        sku_bin_map: SKU → BIN 매핑 딕셔너리
+    
+    Returns:
+        성공 여부
+    """
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        
+        # 한글 폰트 등록 (자동 탐색)
+        from utils import find_korean_font
+        try:
+            font_path = find_korean_font()
+            if font_path and os.path.exists(font_path):
+                pdfmetrics.registerFont(TTFont('KoreanFont', font_path))
+                font_name = 'KoreanFont'
+                print(f"[피킹리스트] 한글 폰트 사용: {font_path}")
+            else:
+                font_name = 'Helvetica'
+                print("[피킹리스트] 한글 폰트를 찾을 수 없어 영문 폰트 사용")
+        except Exception as e:
+            font_name = 'Helvetica'
+            print(f"[피킹리스트] 폰트 로드 오류: {e}")
+        
+        # PDF 문서 생성
+        doc = SimpleDocTemplate(
+            output_path,
+            pagesize=A4,
+            rightMargin=15*mm,
+            leftMargin=15*mm,
+            topMargin=15*mm,
+            bottomMargin=15*mm
+        )
+        
+        elements = []
+        
+        # 스타일 설정
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'Title',
+            parent=styles['Heading1'],
+            fontName=font_name,
+            fontSize=16,
+            alignment=1,  # 중앙 정렬
+            spaceAfter=10*mm
+        )
+        
+        # 제목
+        elements.append(Paragraph("제품별 피킹리스트", title_style))
+        elements.append(Spacer(1, 5*mm))
+        
+        # SKU별 집계
+        if df is None or df.empty:
+            elements.append(Paragraph("데이터가 없습니다.", styles['Normal']))
+        else:
+            # BIN 정보 추가
+            df_copy = df.copy()
+            if sku_bin_map:
+                df_copy['bin'] = df_copy['barcode'].map(lambda x: sku_bin_map.get(str(x), '-'))
+            else:
+                df_copy['bin'] = '-'
+            
+            # SKU별 집계
+            sku_summary = df_copy.groupby(['barcode', 'bin']).agg({
+                'qty': 'sum',
+                'product_name': 'first'
+            }).reset_index()
+            
+            # BIN 순서로 정렬
+            sku_summary = sku_summary.sort_values(['bin', 'barcode'])
+            
+            # 테이블 데이터 생성
+            table_data = [['BIN', '바코드', '상품명', '수량']]
+            
+            for _, row in sku_summary.iterrows():
+                bin_val = str(row['bin']) if row['bin'] else '-'
+                barcode = str(row['barcode'])
+                product_name = str(row['product_name'])[:30] if row['product_name'] else '-'
+                qty = int(row['qty'])
+                
+                table_data.append([bin_val, barcode, product_name, str(qty)])
+            
+            # 합계 행
+            total_qty = int(sku_summary['qty'].sum())
+            table_data.append(['합계', '', f'{len(sku_summary)}종', str(total_qty)])
+            
+            # 테이블 생성
+            col_widths = [25*mm, 45*mm, 80*mm, 25*mm]
+            table = Table(table_data, colWidths=col_widths)
+            
+            # 테이블 스타일
+            table.setStyle(TableStyle([
+                ('FONTNAME', (0, 0), (-1, -1), font_name),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('ALIGN', (2, 1), (2, -1), 'LEFT'),  # 상품명은 왼쪽 정렬
+                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('BACKGROUND', (0, -1), (-1, -1), colors.lightgrey),
+                ('FONTSIZE', (0, -1), (-1, -1), 10),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ]))
+            
+            elements.append(table)
+        
+        # PDF 생성
+        doc.build(elements)
+        print(f"[피킹리스트] PDF 생성 완료: {output_path}")
+        return True
+        
+    except ImportError as e:
+        print(f"[피킹리스트] reportlab 패키지가 필요합니다: {e}")
+        return False
+    except Exception as e:
+        print(f"[피킹리스트] PDF 생성 오류: {e}")
         return False
 

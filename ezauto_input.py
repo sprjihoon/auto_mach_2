@@ -54,12 +54,24 @@ class EzAutoInput(QObject):
     
     def __init__(self):
         super().__init__()
-        self._enabled = True
+        
+        # 설정 파일에서 로드
+        try:
+            from printer_manager import load_ezauto_settings
+            ezauto_settings = load_ezauto_settings()
+            self._enabled = ezauto_settings.get("enabled", True)
+            self._delay_after_tracking = ezauto_settings.get("delay_after_tracking", 0.8)
+            self._delay_after_barcode = ezauto_settings.get("delay_after_barcode", 0.3)
+            self._window_title = ezauto_settings.get("window_title", "이지오토")
+            self._use_clipboard = ezauto_settings.get("use_clipboard", False)
+        except Exception:
+            self._enabled = True
+            self._delay_after_tracking = 0.8
+            self._delay_after_barcode = 0.3
+            self._window_title = "이지오토"
+            self._use_clipboard = False
+        
         self._typing_interval = 0.02      # 문자 간 입력 간격
-        self._delay_after_tracking = 0.8  # tracking_no 입력 후 대기 시간
-        self._delay_after_barcode = 0.3   # barcode 입력 후 대기 시간
-        self._window_title = "이지오토"   # EzAuto 창 제목 (부분 매칭)
-        self._use_clipboard = False       # typewrite 방식 사용 (EzAuto 호환성)
         self._return_focus = True         # 입력 후 원래 창으로 복귀
         self._original_hwnd = None        # 원래 창 핸들
     

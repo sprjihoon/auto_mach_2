@@ -94,8 +94,8 @@ class WorkSessionManager(QObject):
         # 저장 경로
         self._save_path = save_path or "work_sessions.json"
         
-        # 파일에서 로드
-        self._load_from_file()
+        # 프로그램 시작 시 항상 빈 상태로 시작 (파일에서 로드하지 않음)
+        # self._load_from_file()
     
     @property
     def current_session(self) -> Optional[WorkSession]:
@@ -111,6 +111,11 @@ class WorkSessionManager(QObject):
     def session_count(self) -> int:
         """저장된 세션 수"""
         return len(self._sessions)
+    
+    @property
+    def sessions(self) -> Dict[int, WorkSession]:
+        """세션 딕셔너리 (읽기 전용)"""
+        return self._sessions
     
     def create_session(self, 
                       suppliers: List[str],

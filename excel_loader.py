@@ -872,6 +872,36 @@ class ExcelLoader(QObject):
             self.error_occurred.emit(f"공급처 필터링 오류: {str(e)}")
             return False
     
+    def get_filtered_by_suppliers(self, suppliers):
+        """
+        특정 공급처(들)로 필터링된 데이터프레임 반환 (원본 변경 없음)
+        
+        Args:
+            suppliers: 공급처명 또는 공급처명 리스트
+        
+        Returns:
+            필터링된 DataFrame 또는 None
+        """
+        if self._df_original is None:
+            return None
+        
+        try:
+            # 문자열이면 리스트로 변환
+            if isinstance(suppliers, str):
+                suppliers = [suppliers] if suppliers and suppliers != "전체" else None
+            
+            if suppliers is None or len(suppliers) == 0:
+                # 전체 데이터 복사본 반환
+                return self._df_original.copy()
+            else:
+                # 선택한 공급처들만 필터링
+                supplier_values = self._df_original['supplier'].astype(str).str.strip()
+                mask = supplier_values.isin(suppliers)
+                return self._df_original[mask].copy()
+                
+        except Exception as e:
+            return None
+    
     def get_current_supplier(self) -> Optional[str]:
         """
         현재 선택된 공급처 반환 (단일 또는 첫 번째)

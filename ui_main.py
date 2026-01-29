@@ -5,7 +5,7 @@ import sys
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QTextEdit, QPushButton,
@@ -191,11 +191,219 @@ from printer_manager import (
     print_pdf_with_printer, check_printer_exists,
     save_bin_settings, load_bin_settings,
     validate_printer_settings, get_printer_status_message, auto_select_default_printer,
-    ensure_settings_file
+    ensure_settings_file, is_first_run, set_first_run_complete,
+    get_diagnosis_report, load_esp32_settings, save_esp32_settings,
+    load_ezauto_settings, save_ezauto_settings
 )
+from utils import is_admin, get_admin_status_message
 from pdf_search import find_pdf_by_tracking_or_order
 from reprint_pdf_extractor import extract_pages_from_pdf, extract_reprint_page_to_temp
 from bin_manager import BinManager
+
+
+class SetupWizardDialog(QDialog):
+    """첫 실행 설정 마법사 다이얼로그"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("🚀 AutoMach 초기 설정")
+        self.setMinimumSize(600, 500)
+        self.setModal(True)
+        self._init_ui()
+    
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        # 헤더
+        header = QLabel("<h2>🚀 AutoMach 초기 설정</h2>")
+        header.setAlignment(Qt.AlignCenter)
+        layout.addWidget(header)
+        
+        # 환영 메시지
+        welcome = QLabel(
+            "AutoMach를 처음 실행합니다.\n"
+            "원활한 사용을 위해 아래 설정을 확인해 주세요."
+        )
+        welcome.setStyleSheet("color: #666; padding: 10px; background: #f5f5f5; border-radius: 5px;")
+        welcome.setWordWrap(True)
+        welcome.setAlignment(Qt.AlignCenter)
+        layout.addWidget(welcome)
+        
+        # 탭 위젯
+        tabs = QTabWidget()
+        
+        # 1. 시스템 진단 탭
+        diagnosis_tab = QWidget()
+        diagnosis_layout = QVBoxLayout(diagnosis_tab)
+        
+        self.diagnosis_text = QTextEdit()
+        self.diagnosis_text.setReadOnly(True)
+        self.diagnosis_text.setFont(QFont("Consolas", 10))
+        diagnosis_layout.addWidget(self.diagnosis_text)
+        
+        refresh_btn = QPushButton("🔄 다시 진단")
+        refresh_btn.clicked.connect(self._refresh_diagnosis)
+        diagnosis_layout.addWidget(refresh_btn)
+        
+        tabs.addTab(diagnosis_tab, "📋 시스템 진단")
+        
+        # 2. 프린터 설정 탭
+        printer_tab = QWidget()
+        printer_layout = QVBoxLayout(printer_tab)
+        
+        # 라벨 프린터
+        label_group = QGroupBox("🏷️ 라벨 프린터 (송장 출력)")
+        label_layout = QVBoxLayout(label_group)
+        self.label_printer_combo = QComboBox()
+        self.label_printer_combo.setMinimumWidth(300)
+        label_layout.addWidget(self.label_printer_combo)
+        printer_layout.addWidget(label_group)
+        
+        # A4 프린터
+        a4_group = QGroupBox("📄 A4 프린터 (주문서 출력)")
+        a4_layout = QVBoxLayout(a4_group)
+        self.a4_printer_combo = QComboBox()
+        self.a4_printer_combo.setMinimumWidth(300)
+        a4_layout.addWidget(self.a4_printer_combo)
+        printer_layout.addWidget(a4_group)
+        
+        printer_layout.addStretch()
+        tabs.addTab(printer_tab, "🖨️ 프린터 설정")
+        
+        # 3. EzAuto 설정 탭
+        ezauto_tab = QWidget()
+        ezauto_layout = QVBoxLayout(ezauto_tab)
+        
+        ezauto_group = QGroupBox("🖥️ EzAuto 창 제목")
+        ezauto_inner = QVBoxLayout(ezauto_group)
+        
+        ezauto_desc = QLabel(
+            "EzAuto 프로그램의 창 제목을 입력하세요.\n"
+            "창 제목에 포함된 문자열로 검색합니다."
+        )
+        ezauto_desc.setWordWrap(True)
+        ezauto_inner.addWidget(ezauto_desc)
+        
+        self.ezauto_title_edit = QLineEdit()
+        self.ezauto_title_edit.setPlaceholderText("예: 이지오토, EzAuto")
+        ezauto_inner.addWidget(self.ezauto_title_edit)
+        
+        ezauto_layout.addWidget(ezauto_group)
+        
+        # ESP32 설정
+        esp32_group = QGroupBox("📡 ESP32 WebSocket 포트")
+        esp32_inner = QVBoxLayout(esp32_group)
+        
+        esp32_desc = QLabel("ESP32 장치 연결용 WebSocket 서버 포트:")
+        esp32_inner.addWidget(esp32_desc)
+        
+        self.esp32_port_spin = QSpinBox()
+        self.esp32_port_spin.setRange(1024, 65535)
+        self.esp32_port_spin.setValue(8765)
+        esp32_inner.addWidget(self.esp32_port_spin)
+        
+        ezauto_layout.addWidget(esp32_group)
+        ezauto_layout.addStretch()
+        
+        tabs.addTab(ezauto_tab, "⚙️ 기타 설정")
+        
+        layout.addWidget(tabs)
+        
+        # 관리자 권한 경고
+        if not is_admin():
+            admin_warning = QLabel(
+                "⚠️ 관리자 권한으로 실행하지 않았습니다.\n"
+                "바코드 스캐너 기능이 제한될 수 있습니다.\n"
+                "프로그램을 우클릭하여 '관리자 권한으로 실행'을 권장합니다."
+            )
+            admin_warning.setStyleSheet(
+                "color: #D32F2F; padding: 10px; background: #FFEBEE; "
+                "border: 1px solid #EF5350; border-radius: 5px;"
+            )
+            admin_warning.setWordWrap(True)
+            layout.addWidget(admin_warning)
+        
+        # 버튼
+        btn_layout = QHBoxLayout()
+        
+        save_btn = QPushButton("✅ 설정 저장 후 시작")
+        save_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 10px;")
+        save_btn.clicked.connect(self._save_and_close)
+        btn_layout.addWidget(save_btn)
+        
+        skip_btn = QPushButton("나중에 설정")
+        skip_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(skip_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        # 초기화
+        self._load_printers()
+        self._load_settings()
+        self._refresh_diagnosis()
+    
+    def _load_printers(self):
+        """프린터 목록 로드"""
+        printers = get_printers()
+        
+        self.label_printer_combo.clear()
+        self.a4_printer_combo.clear()
+        
+        self.label_printer_combo.addItem("(선택 안함)", None)
+        self.a4_printer_combo.addItem("(선택 안함)", None)
+        
+        for printer in printers:
+            self.label_printer_combo.addItem(printer, printer)
+            self.a4_printer_combo.addItem(printer, printer)
+        
+        # 현재 설정 로드
+        settings = load_printer_settings()
+        if settings.get("label_printer"):
+            idx = self.label_printer_combo.findData(settings["label_printer"])
+            if idx >= 0:
+                self.label_printer_combo.setCurrentIndex(idx)
+        
+        if settings.get("a4_printer"):
+            idx = self.a4_printer_combo.findData(settings["a4_printer"])
+            if idx >= 0:
+                self.a4_printer_combo.setCurrentIndex(idx)
+    
+    def _load_settings(self):
+        """기존 설정 로드"""
+        # EzAuto 설정
+        ezauto_settings = load_ezauto_settings()
+        self.ezauto_title_edit.setText(ezauto_settings.get("window_title", "이지오토"))
+        
+        # ESP32 설정
+        esp32_settings = load_esp32_settings()
+        self.esp32_port_spin.setValue(esp32_settings.get("port", 8765))
+    
+    def _refresh_diagnosis(self):
+        """시스템 진단 새로고침"""
+        report = get_diagnosis_report()
+        self.diagnosis_text.setPlainText(report)
+    
+    def _save_and_close(self):
+        """설정 저장 후 닫기"""
+        # 프린터 설정 저장
+        label_printer = self.label_printer_combo.currentData()
+        a4_printer = self.a4_printer_combo.currentData()
+        save_printer_settings(label_printer, a4_printer)
+        
+        # EzAuto 설정 저장
+        ezauto_title = self.ezauto_title_edit.text().strip()
+        if ezauto_title:
+            save_ezauto_settings(window_title=ezauto_title)
+        
+        # ESP32 설정 저장
+        esp32_port = self.esp32_port_spin.value()
+        save_esp32_settings(port=esp32_port)
+        
+        # 첫 실행 완료 표시
+        set_first_run_complete()
+        
+        self.accept()
 
 
 class SupplierSelectDialog(QDialog):
@@ -606,9 +814,17 @@ class MainWindow(QMainWindow):
         # 제외 송장 목록 초기화
         self._excluded_tracking_numbers: set = set()
         
-        # 작업 차수 관리 (1차, 2차 피킹 등)
-        self._work_session: int = 0  # 업체 선택/변경 시마다 증가
+        # 작업 차수 관리 (1차, 2차 피킹 등) - 각 탭별 독립 관리
+        self._work_session: int = 0  # 업체 선택/변경 시마다 증가 (기본/출고용)
         self._work_session_supplier: str = ""  # 현재 작업 차수의 업체명
+        
+        # 각 탭별 독립적인 세션 ID
+        self._shipment_session_id: int = 0  # 출고 탭 선택 세션
+        self._fp_session_id: int = 0  # 전체피킹 탭 선택 세션
+        self._pp_session_id: int = 0  # 미리피킹 탭 선택 세션
+        
+        # 출고 탭 - 출력된 송장 추적 (세션별)
+        self._printed_tracking_nos: Dict[int, set] = {}  # {session_id: {tracking_no, ...}}
         
         # 우선순위 규칙 초기화 (기본값: 단품 우선)
         from priority_engine import get_default_rules
@@ -653,6 +869,41 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'status_scanner'):
                 self.status_scanner.setText("스캐너: 활성")
             self._add_log("스캐너 자동 시작됨")
+        
+        # 첫 실행 체크 및 설정 마법사 표시
+        self._check_first_run()
+    
+    def _check_first_run(self):
+        """첫 실행 체크 및 설정 마법사 표시"""
+        # 설정 파일 확인/생성
+        ensure_settings_file()
+        
+        # 첫 실행인 경우 마법사 표시
+        if is_first_run():
+            self._add_log("첫 실행 감지 - 초기 설정 마법사 표시")
+            QTimer.singleShot(500, self._show_setup_wizard)
+        else:
+            # 시스템 진단 결과 로그
+            self._add_log(get_admin_status_message())
+            
+            # 프린터 유효성 검사
+            validation = validate_printer_settings()
+            if not validation["label_printer"]["exists"] and validation["label_printer"]["name"]:
+                self._add_log(f"⚠️ 설정된 라벨 프린터를 찾을 수 없습니다: {validation['label_printer']['name']}")
+            if not validation["a4_printer"]["exists"] and validation["a4_printer"]["name"]:
+                self._add_log(f"⚠️ 설정된 A4 프린터를 찾을 수 없습니다: {validation['a4_printer']['name']}")
+    
+    def _show_setup_wizard(self):
+        """초기 설정 마법사 표시"""
+        dialog = SetupWizardDialog(self)
+        dialog.exec()
+        
+        # 마법사 완료 후 프린터 설정 UI 갱신
+        self._load_printer_settings_to_ui()
+        
+        # EzAuto 설정 갱신
+        ezauto_settings = load_ezauto_settings()
+        self.ezauto.set_window_title(ezauto_settings.get("window_title", "이지오토"))
     
     def _init_ui(self):
         """UI 초기화"""
@@ -675,19 +926,19 @@ class MainWindow(QMainWindow):
         self.shipment_tab = self._create_shipment_tab()
         self.tab_widget.addTab(self.shipment_tab, "출고")
         
-        # 재출력 탭
-        self.reprint_tab = self._create_reprint_tab()
-        self.tab_widget.addTab(self.reprint_tab, "재출력")
-        
         # 전체피킹 탭
         self.fullpick_tab = self._create_fullpick_tab()
         self.tab_widget.addTab(self.fullpick_tab, "🚀 전체피킹")
         
-        # 미리피킹 탭 (신규)
+        # 미리피킹 탭
         self.prepick_tab = self._create_prepick_tab()
         self.tab_widget.addTab(self.prepick_tab, "📦 미리피킹")
         
-        # 설정 탭 (신규)
+        # 재출력 탭
+        self.reprint_tab = self._create_reprint_tab()
+        self.tab_widget.addTab(self.reprint_tab, "재출력")
+        
+        # 설정 탭
         self.settings_tab = self._create_settings_tab()
         self.tab_widget.addTab(self.settings_tab, "⚙️ 설정")
         
@@ -781,6 +1032,39 @@ class MainWindow(QMainWindow):
         self.session_info_label.setStyleSheet("color: #666; border: none;")
         session_layout.addWidget(self.session_info_label)
         
+        # 구분선
+        separator3 = QLabel("|")
+        separator3.setStyleSheet("color: #9E9E9E; border: none;")
+        session_layout.addWidget(separator3)
+        
+        # 출력 진행 상태 (전체/출력/남음)
+        self.session_print_status_label = QLabel("🖨️ 0/0 (남음: 0)")
+        self.session_print_status_label.setFont(QFont("Arial", 11))
+        self.session_print_status_label.setStyleSheet("color: #4CAF50; border: none;")
+        session_layout.addWidget(self.session_print_status_label)
+        
+        # 남은 송장 전체 출력 버튼
+        self.print_remaining_btn = QPushButton("📤 남은 송장 전체 출력")
+        self.print_remaining_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF5722;
+                color: white;
+                font-weight: bold;
+                padding: 5px 10px;
+                border-radius: 4px;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #E64A19;
+            }
+            QPushButton:disabled {
+                background-color: #BDBDBD;
+            }
+        """)
+        self.print_remaining_btn.clicked.connect(self._on_print_remaining)
+        self.print_remaining_btn.setEnabled(False)
+        session_layout.addWidget(self.print_remaining_btn)
+        
         layout.addWidget(session_frame)
         
         # 세션 목록 드롭다운
@@ -791,11 +1075,12 @@ class MainWindow(QMainWindow):
         self.session_combo.currentIndexChanged.connect(self._on_session_combo_changed)
         layout.addWidget(self.session_combo)
         
-        # 세션 관리 버튼
-        self.session_clear_btn = QPushButton("🗑️ 초기화")
-        self.session_clear_btn.setMaximumWidth(80)
-        self.session_clear_btn.clicked.connect(self._on_clear_sessions)
-        layout.addWidget(self.session_clear_btn)
+        # 새로고침 버튼 (차수 선택 해제 + 목록 갱신)
+        self.session_refresh_btn = QPushButton("🔄")
+        self.session_refresh_btn.setMaximumWidth(40)
+        self.session_refresh_btn.setToolTip("차수 선택 해제 및 목록 새로고침")
+        self.session_refresh_btn.clicked.connect(self._on_refresh_shipment_session)
+        layout.addWidget(self.session_refresh_btn)
         
         layout.addStretch()
         
@@ -803,7 +1088,8 @@ class MainWindow(QMainWindow):
     
     def _update_session_display(self):
         """작업 차수 표시 업데이트"""
-        session = self.session_manager.current_session
+        # 출고 탭의 독립적인 세션 ID 사용
+        session = self.session_manager.get_session(self._shipment_session_id) if self._shipment_session_id > 0 else None
         
         if session:
             self.session_display_label.setText(f"📋 {session.session_id}차 작업")
@@ -813,13 +1099,206 @@ class MainWindow(QMainWindow):
             # 작업 차수 변수도 업데이트
             self._work_session = session.session_id
             self._work_session_supplier = session.supplier_display
+            
+            # 출력 진행 상태 업데이트
+            self._update_print_status()
         else:
             self.session_display_label.setText("📋 작업 대기")
             self.session_supplier_label.setText("🏢 업체: 미선택")
             self.session_info_label.setText("📦 0건, 0 SKU")
+            self.session_print_status_label.setText("🖨️ 0/0 (남음: 0)")
+            self.print_remaining_btn.setEnabled(False)
+    
+    def _update_print_status(self):
+        """출력 진행 상태 업데이트"""
+        session_id = self._shipment_session_id
+        if session_id <= 0:
+            self.session_print_status_label.setText("🖨️ 0/0 (남음: 0)")
+            self.print_remaining_btn.setEnabled(False)
+            return
+        
+        session = self.session_manager.get_session(session_id)
+        if not session:
+            return
+        
+        # 해당 세션의 전체 송장 목록 가져오기
+        all_tracking_nos = self._get_session_tracking_nos(session_id)
+        total_count = len(all_tracking_nos)
+        
+        # 출력된 송장 수
+        printed_set = self._printed_tracking_nos.get(session_id, set())
+        printed_count = len(printed_set & all_tracking_nos)  # 교집합으로 정확한 수 계산
+        
+        # 남은 송장 수
+        remaining_count = total_count - printed_count
+        
+        # 상태 표시 업데이트
+        if remaining_count == 0 and total_count > 0:
+            self.session_print_status_label.setText(f"✅ {printed_count}/{total_count} (완료!)")
+            self.session_print_status_label.setStyleSheet("color: #4CAF50; border: none; font-weight: bold;")
+            self.print_remaining_btn.setEnabled(False)
+        elif remaining_count > 0:
+            self.session_print_status_label.setText(f"🖨️ {printed_count}/{total_count} (남음: {remaining_count})")
+            self.session_print_status_label.setStyleSheet("color: #FF9800; border: none;")
+            self.print_remaining_btn.setEnabled(True)
+        else:
+            self.session_print_status_label.setText(f"🖨️ 0/{total_count} (남음: {total_count})")
+            self.session_print_status_label.setStyleSheet("color: #666; border: none;")
+            self.print_remaining_btn.setEnabled(total_count > 0)
+    
+    def _get_session_tracking_nos(self, session_id: int, normalized: bool = True) -> set:
+        """세션의 전체 송장번호 목록 가져오기
+        
+        Args:
+            session_id: 세션 ID
+            normalized: True면 정규화된 형태(하이픈 제거), False면 원본
+        """
+        session = self.session_manager.get_session(session_id)
+        if not session:
+            return set()
+        
+        # 해당 세션의 업체 기반으로 데이터 필터링
+        filtered_df = self.excel_loader.get_filtered_by_suppliers(session.suppliers)
+        if filtered_df is None or filtered_df.empty:
+            return set()
+        
+        # 송장번호 목록
+        if 'tracking_no' in filtered_df.columns:
+            raw_tracking_nos = filtered_df['tracking_no'].dropna().astype(str).unique()
+            if normalized:
+                # 정규화된 형태로 반환 (하이픈/공백 제거)
+                return set(re.sub(r'[-–—\s]', '', t) for t in raw_tracking_nos)
+            else:
+                return set(raw_tracking_nos)
+        return set()
+    
+    def _get_session_tracking_nos_map(self, session_id: int) -> dict:
+        """세션의 송장번호 매핑 (정규화 → 원본)"""
+        session = self.session_manager.get_session(session_id)
+        if not session:
+            return {}
+        
+        filtered_df = self.excel_loader.get_filtered_by_suppliers(session.suppliers)
+        if filtered_df is None or filtered_df.empty:
+            return {}
+        
+        if 'tracking_no' not in filtered_df.columns:
+            return {}
+        
+        # 정규화된 형태 → 원본 매핑
+        mapping = {}
+        for t in filtered_df['tracking_no'].dropna().astype(str).unique():
+            clean = re.sub(r'[-–—\s]', '', t)
+            mapping[clean] = t
+        return mapping
+    
+    def _mark_as_printed(self, tracking_no: str):
+        """송장을 출력됨으로 표시"""
+        session_id = self._shipment_session_id
+        if session_id <= 0:
+            return
+        
+        if session_id not in self._printed_tracking_nos:
+            self._printed_tracking_nos[session_id] = set()
+        
+        # 하이픈 제거한 정규화된 형태로 저장
+        clean_tracking = re.sub(r'[-–—\s]', '', tracking_no)
+        self._printed_tracking_nos[session_id].add(clean_tracking)
+        
+        # 상태 업데이트
+        self._update_print_status()
+    
+    def _on_print_remaining(self):
+        """남은 송장 전체 출력"""
+        session_id = self._shipment_session_id
+        if session_id <= 0:
+            QMessageBox.warning(self, "알림", "먼저 차수를 선택해주세요.")
+            return
+        
+        # 전체 송장 목록 (정규화된 형태)
+        all_tracking_nos = self._get_session_tracking_nos(session_id, normalized=True)
+        if not all_tracking_nos:
+            QMessageBox.warning(self, "알림", "출력할 송장이 없습니다.")
+            return
+        
+        # 정규화 → 원본 매핑
+        tracking_map = self._get_session_tracking_nos_map(session_id)
+        
+        # 출력된 송장 제외 (정규화된 형태로 비교)
+        printed_set = self._printed_tracking_nos.get(session_id, set())
+        remaining_nos = all_tracking_nos - printed_set
+        
+        if not remaining_nos:
+            QMessageBox.information(self, "완료", "모든 송장이 이미 출력되었습니다.")
+            return
+        
+        # 확인 대화상자
+        reply = QMessageBox.question(
+            self,
+            "남은 송장 전체 출력",
+            f"남은 {len(remaining_nos)}건의 송장을 모두 출력하시겠습니까?\n\n"
+            f"⚠️ 많은 양의 출력은 시간이 걸릴 수 있습니다.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # 일괄 출력 시작
+        self._add_log(f"<b style='color:#FF5722'>[일괄출력] {len(remaining_nos)}건 출력 시작...</b>", html=True)
+        
+        success_count = 0
+        fail_count = 0
+        total = len(remaining_nos)
+        
+        for idx, clean_tracking_no in enumerate(sorted(remaining_nos), 1):
+            # 원본 송장번호 가져오기 (PDF 인덱스 매칭용)
+            original_tracking_no = tracking_map.get(clean_tracking_no, clean_tracking_no)
+            
+            try:
+                # PDF 출력
+                if self.pdf_printer.enabled:
+                    # 정규화된 형태와 원본 모두 시도
+                    result = self.pdf_printer.print_pdf(clean_tracking_no)
+                    if not result and original_tracking_no != clean_tracking_no:
+                        result = self.pdf_printer.print_pdf(original_tracking_no)
+                    
+                    if result:
+                        self._mark_as_printed(clean_tracking_no)
+                        success_count += 1
+                    else:
+                        self._add_log(f"[일괄출력] PDF 없음: {original_tracking_no}")
+                        fail_count += 1
+                else:
+                    # PDF 출력 비활성화 시 EzAuto만
+                    if self.ezauto.enabled:
+                        self.ezauto.send_tracking_number(original_tracking_no)
+                    self._mark_as_printed(clean_tracking_no)
+                    success_count += 1
+                
+                # 10개마다 진행 상황 로그
+                if idx % 10 == 0:
+                    self._add_log(f"[일괄출력] 진행 중... {idx}/{total}")
+                    # UI 업데이트를 위한 이벤트 처리
+                    QApplication.processEvents()
+                    
+            except Exception as e:
+                self._add_log(f"[일괄출력] 오류: {original_tracking_no} - {str(e)}")
+                fail_count += 1
+        
+        # 결과 표시
+        self._add_log(f"<b style='color:#4CAF50'>[일괄출력] 완료: 성공 {success_count}건, 실패 {fail_count}건</b>", html=True)
+        
+        QMessageBox.information(
+            self,
+            "일괄 출력 완료",
+            f"출력 완료!\n\n"
+            f"✅ 성공: {success_count}건\n"
+            f"❌ 실패: {fail_count}건"
+        )
     
     def _update_session_combo(self):
-        """세션 드롭다운 업데이트"""
+        """출고 탭 세션 드롭다운 업데이트 (독립적)"""
         self.session_combo.blockSignals(True)
         self.session_combo.clear()
         self.session_combo.addItem("-- 선택 --", 0)
@@ -827,26 +1306,36 @@ class MainWindow(QMainWindow):
         for session_id, display_name in self.session_manager.get_session_choices():
             self.session_combo.addItem(display_name, session_id)
         
-        # 현재 세션 선택
-        if self.session_manager.current_session:
+        # 출고 탭 자체 세션 ID 기반으로 선택
+        if self._shipment_session_id > 0:
             for i in range(self.session_combo.count()):
-                if self.session_combo.itemData(i) == self.session_manager.current_session.session_id:
+                if self.session_combo.itemData(i) == self._shipment_session_id:
                     self.session_combo.setCurrentIndex(i)
                     break
         
         self.session_combo.blockSignals(False)
+        
+        # 전체피킹/미리피킹 세션 콤보도 업데이트 (각자 독립적으로)
+        if hasattr(self, 'fp_session_combo'):
+            self._update_fp_session_combo()
+        if hasattr(self, 'pp_session_combo'):
+            self._update_pp_session_combo()
     
     @Slot(int)
     def _on_session_combo_changed(self, index: int):
-        """세션 드롭다운 변경"""
+        """출고 탭 세션 드롭다운 변경 (독립적)"""
         session_id = self.session_combo.itemData(index)
         if session_id and session_id > 0:
-            session = self.session_manager.select_session(session_id)
+            self._shipment_session_id = session_id
+            session = self.session_manager.get_session(session_id)
             if session:
-                self._load_session(session)
+                self._load_shipment_session(session)
     
-    def _load_session(self, session: WorkSession):
-        """저장된 세션 로드"""
+    def _load_shipment_session(self, session: WorkSession):
+        """출고 탭용 세션 로드 (독립적)"""
+        # 출고 탭 전용 세션 ID 저장
+        self._shipment_session_id = session.session_id
+        
         # 업체 필터 적용
         if session.suppliers:
             if len(session.suppliers) == 1:
@@ -854,37 +1343,34 @@ class MainWindow(QMainWindow):
             else:
                 self.excel_loader.filter_by_supplier(session.suppliers)
         
-        # BIN 매핑 복원 (선택적)
-        # self.bin_manager._sku_bin_map = session.sku_bin_map.copy()
-        
-        # 작업 차수 업데이트
+        # 출고 탭 전용 작업 차수 업데이트
         self._work_session = session.session_id
         self._work_session_supplier = session.supplier_display
         
-        # UI 업데이트
+        # 출고 탭 UI만 업데이트 (다른 탭에 영향 없음)
         self._update_session_display()
-        self._update_fp_session_info()
+        self._update_tables()
         
-        self._add_log(f"<b style='color:#3F51B5'>[세션 로드] {session.session_id}차 작업 - {session.supplier_display}</b>", html=True)
+        self._add_log(f"<b style='color:#3F51B5'>[출고] {session.session_id}차 작업 선택 - {session.supplier_display}</b>", html=True)
     
     @Slot()
-    def _on_clear_sessions(self):
-        """모든 세션 초기화"""
-        reply = QMessageBox.question(
-            self,
-            "세션 초기화",
-            "저장된 모든 작업 차수를 삭제하시겠습니까?\n\n"
-            "이 작업은 되돌릴 수 없습니다.",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
-            self.session_manager.clear_all_sessions()
-            self._work_session = 0
-            self._work_session_supplier = ""
-            self._update_session_display()
-            self._update_session_combo()
-            self._update_fp_session_info()
-            self._add_log("[세션] 모든 작업 차수가 초기화되었습니다.")
+    def _on_refresh_shipment_session(self):
+        """출고 탭 - 차수 선택 해제 및 새로고침"""
+        # 출고 탭 세션 선택 해제
+        self._shipment_session_id = 0
+        self._work_session = 0
+        self._work_session_supplier = ""
+        
+        # 콤보박스 초기화
+        self.session_combo.blockSignals(True)
+        self.session_combo.setCurrentIndex(0)
+        self.session_combo.blockSignals(False)
+        
+        # UI 업데이트
+        self._update_session_combo()
+        self._update_session_display()
+        
+        self._add_log("[출고] 차수 선택이 해제되었습니다. 다른 차수를 선택하세요.")
     
     def _create_reprint_tab(self) -> QWidget:
         """재출력 탭 생성"""
@@ -1044,10 +1530,11 @@ class MainWindow(QMainWindow):
         self.fp_session_combo.currentIndexChanged.connect(self._on_fp_session_combo_changed)
         session_select_layout.addWidget(self.fp_session_combo)
         
-        # 새로고침 버튼
+        # 새로고침 버튼 (선택 해제 + 목록 갱신)
         self.fp_refresh_session_btn = QPushButton("🔄")
         self.fp_refresh_session_btn.setMaximumWidth(40)
-        self.fp_refresh_session_btn.clicked.connect(self._update_fp_session_combo)
+        self.fp_refresh_session_btn.setToolTip("차수 선택 해제 및 목록 새로고침")
+        self.fp_refresh_session_btn.clicked.connect(self._on_refresh_fp_session)
         session_select_layout.addWidget(self.fp_refresh_session_btn)
         
         session_layout.addWidget(session_select_group)
@@ -1178,7 +1665,43 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
         
-        bin_group = QGroupBox("🗃️ BIN 피킹 목록")
+        # ★ 스캔 히스토리 테이블 (최근 스캔 SKU 목록)
+        history_group = QGroupBox("📋 스캔 히스토리 (최근 스캔 SKU)")
+        history_layout = QVBoxLayout(history_group)
+        
+        self.fp_scan_history_table = QTableWidget()
+        self.fp_scan_history_table.setColumnCount(5)
+        self.fp_scan_history_table.setHorizontalHeaderLabels(["SKU 바코드", "총 수량", "BIN 수", "상태", "시간"])
+        self.fp_scan_history_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.fp_scan_history_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        self.fp_scan_history_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.fp_scan_history_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self.fp_scan_history_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
+        self.fp_scan_history_table.setColumnWidth(1, 70)   # 총 수량
+        self.fp_scan_history_table.setColumnWidth(2, 60)   # BIN 수
+        self.fp_scan_history_table.setColumnWidth(3, 80)   # 상태
+        self.fp_scan_history_table.setColumnWidth(4, 80)   # 시간
+        self.fp_scan_history_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.fp_scan_history_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.fp_scan_history_table.setMaximumHeight(150)
+        self.fp_scan_history_table.verticalHeader().setDefaultSectionSize(30)
+        self.fp_scan_history_table.itemClicked.connect(self._on_fp_history_item_clicked)
+        history_layout.addWidget(self.fp_scan_history_table)
+        
+        # 히스토리 초기화 버튼
+        history_btn_row = QHBoxLayout()
+        self.fp_clear_history_btn = QPushButton("🗑️ 히스토리 초기화")
+        self.fp_clear_history_btn.clicked.connect(self._on_fp_clear_history)
+        history_btn_row.addWidget(self.fp_clear_history_btn)
+        history_btn_row.addStretch()
+        history_layout.addLayout(history_btn_row)
+        
+        right_layout.addWidget(history_group)
+        
+        # 스캔 히스토리 데이터 저장용
+        self._fp_scan_history = []  # [(barcode, total_qty, bin_count, status, time), ...]
+        
+        bin_group = QGroupBox("🗃️ BIN 피킹 목록 (현재 SKU)")
         bin_layout = QVBoxLayout(bin_group)
         
         # BIN 테이블
@@ -1194,7 +1717,7 @@ class MainWindow(QMainWindow):
         self.fp_bin_table.setColumnWidth(3, 80)   # 완료 버튼
         self.fp_bin_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.fp_bin_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.fp_bin_table.setMinimumHeight(300)
+        self.fp_bin_table.setMinimumHeight(200)
         self.fp_bin_table.verticalHeader().setDefaultSectionSize(40)  # 행 높이
         bin_layout.addWidget(self.fp_bin_table)
         
@@ -1262,7 +1785,58 @@ class MainWindow(QMainWindow):
         layout.setSpacing(15)
         layout.setContentsMargins(20, 20, 20, 20)
         
-        # ===== 상단: 주문 스캔 영역 =====
+        # ===== 상단 1행: 작업 차수 선택 =====
+        session_layout = QHBoxLayout()
+        
+        # 작업 차수 선택 드롭다운
+        session_select_group = QGroupBox("📋 작업 차수 선택")
+        session_select_layout = QHBoxLayout(session_select_group)
+        
+        self.pp_session_combo = QComboBox()
+        self.pp_session_combo.setMinimumWidth(300)
+        self.pp_session_combo.setFont(QFont("Arial", 12))
+        self.pp_session_combo.addItem("-- 출고 탭에서 업체 선택 필요 --", 0)
+        self.pp_session_combo.currentIndexChanged.connect(self._on_pp_session_combo_changed)
+        session_select_layout.addWidget(self.pp_session_combo)
+        
+        # 새로고침 버튼 (선택 해제 + 목록 갱신)
+        self.pp_refresh_session_btn = QPushButton("🔄")
+        self.pp_refresh_session_btn.setMaximumWidth(40)
+        self.pp_refresh_session_btn.setToolTip("차수 선택 해제 및 목록 새로고침")
+        self.pp_refresh_session_btn.clicked.connect(self._on_refresh_pp_session)
+        session_select_layout.addWidget(self.pp_refresh_session_btn)
+        
+        session_layout.addWidget(session_select_group)
+        
+        # 현재 선택된 차수 표시
+        current_group = QGroupBox("🎯 현재 작업")
+        current_layout = QHBoxLayout(current_group)
+        self.pp_session_label = QLabel("미선택")
+        self.pp_session_label.setFont(QFont("Arial", 14, QFont.Bold))
+        self.pp_session_label.setStyleSheet("color: #9C27B0;")
+        current_layout.addWidget(self.pp_session_label)
+        session_layout.addWidget(current_group)
+        
+        # 현재 업체 표시
+        supplier_group = QGroupBox("🏢 업체")
+        supplier_grp_layout = QHBoxLayout(supplier_group)
+        self.pp_supplier_label = QLabel("업체 미선택")
+        self.pp_supplier_label.setFont(QFont("Arial", 12, QFont.Bold))
+        self.pp_supplier_label.setStyleSheet("color: #FF9800;")
+        supplier_grp_layout.addWidget(self.pp_supplier_label)
+        session_layout.addWidget(supplier_group)
+        
+        # 데이터 상태
+        data_group = QGroupBox("📦 데이터")
+        data_grp_layout = QHBoxLayout(data_group)
+        self.pp_data_status = QLabel("엑셀 미로드")
+        self.pp_data_status.setFont(QFont("Arial", 11))
+        data_grp_layout.addWidget(self.pp_data_status)
+        session_layout.addWidget(data_group)
+        
+        layout.addLayout(session_layout)
+        
+        # ===== 상단 2행: 주문 스캔 영역 =====
         scan_group = QGroupBox("📦 주문 스캔")
         scan_layout = QVBoxLayout(scan_group)
         
@@ -1422,53 +1996,115 @@ class MainWindow(QMainWindow):
         
         scroll_layout.addWidget(upload_group)
         
-        # ===== 2. 프린터 설정 섹션 =====
-        printer_group = QGroupBox("🖨️ 프린터 설정")
-        printer_layout = QVBoxLayout(printer_group)
-        printer_layout.setSpacing(15)
+        # ===== 2. 차수 관리 섹션 =====
+        session_group = QGroupBox("📋 차수 관리")
+        session_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #3F51B5;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 15px;
+                background-color: #E8EAF6;
+            }
+            QGroupBox::title {
+                color: #3F51B5;
+            }
+        """)
+        session_layout = QVBoxLayout(session_group)
+        session_layout.setSpacing(15)
         
-        # 라벨 프린터
-        label_printer_row = QHBoxLayout()
-        label_printer_row.addWidget(QLabel("라벨 프린터:"))
-        self.settings_label_printer = QComboBox()
-        self.settings_label_printer.setMinimumWidth(250)
-        label_printer_row.addWidget(self.settings_label_printer, 1)
-        self.settings_label_test_btn = QPushButton("테스트 출력")
-        self.settings_label_test_btn.clicked.connect(self._on_settings_test_label_printer)
-        label_printer_row.addWidget(self.settings_label_test_btn)
-        printer_layout.addLayout(label_printer_row)
+        # 설명
+        session_desc = QLabel(
+            "엑셀 로드 후 업체를 선택하여 작업 차수를 생성합니다.\n"
+            "여러 업체를 선택하면 동일한 BIN 시스템을 공유합니다."
+        )
+        session_desc.setStyleSheet("color: #555; padding: 5px; background: white; border-radius: 3px;")
+        session_desc.setWordWrap(True)
+        session_layout.addWidget(session_desc)
         
-        # A4 프린터
-        a4_printer_row = QHBoxLayout()
-        a4_printer_row.addWidget(QLabel("A4 프린터:"))
-        self.settings_a4_printer = QComboBox()
-        self.settings_a4_printer.setMinimumWidth(250)
-        a4_printer_row.addWidget(self.settings_a4_printer, 1)
-        self.settings_a4_test_btn = QPushButton("테스트 출력")
-        self.settings_a4_test_btn.clicked.connect(self._on_settings_test_a4_printer)
-        a4_printer_row.addWidget(self.settings_a4_test_btn)
-        printer_layout.addLayout(a4_printer_row)
+        # 업체 선택 영역 (체크박스 리스트)
+        supplier_label = QLabel("🏢 업체 선택 (다중 선택 가능):")
+        session_layout.addWidget(supplier_label)
         
-        # 회전 설정
-        rotation_row = QHBoxLayout()
-        rotation_row.addWidget(QLabel("송장 회전:"))
-        self.settings_rotation = QComboBox()
-        self.settings_rotation.addItems(["0°", "90°", "180°", "270°"])
-        self.settings_rotation.setMaximumWidth(100)
-        self.settings_rotation.currentIndexChanged.connect(self._on_settings_rotation_changed)
-        rotation_row.addWidget(self.settings_rotation)
-        rotation_row.addStretch()
-        printer_layout.addLayout(rotation_row)
+        self.settings_supplier_list = QListWidget()
+        self.settings_supplier_list.setMaximumHeight(120)
+        self.settings_supplier_list.setStyleSheet("""
+            QListWidget {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+            }
+            QListWidget::item {
+                padding: 5px;
+            }
+        """)
+        session_layout.addWidget(self.settings_supplier_list)
         
-        # 프린터 목록 새로고침
-        refresh_row = QHBoxLayout()
-        refresh_row.addStretch()
-        self.settings_refresh_printers_btn = QPushButton("🔄 프린터 목록 새로고침")
-        self.settings_refresh_printers_btn.clicked.connect(self._on_settings_refresh_printers)
-        refresh_row.addWidget(self.settings_refresh_printers_btn)
-        printer_layout.addLayout(refresh_row)
+        # 전체 선택/해제 + 차수 생성 버튼
+        supplier_btn_row = QHBoxLayout()
         
-        scroll_layout.addWidget(printer_group)
+        self.settings_select_all_btn = QPushButton("✅ 전체 선택")
+        self.settings_select_all_btn.clicked.connect(self._on_settings_select_all_suppliers)
+        supplier_btn_row.addWidget(self.settings_select_all_btn)
+        
+        self.settings_deselect_all_btn = QPushButton("⬜ 전체 해제")
+        self.settings_deselect_all_btn.clicked.connect(self._on_settings_deselect_all_suppliers)
+        supplier_btn_row.addWidget(self.settings_deselect_all_btn)
+        
+        supplier_btn_row.addStretch()
+        
+        self.settings_create_session_btn = QPushButton("✅ 차수 생성")
+        self.settings_create_session_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self.settings_create_session_btn.clicked.connect(self._on_settings_create_session)
+        self.settings_create_session_btn.setEnabled(False)
+        supplier_btn_row.addWidget(self.settings_create_session_btn)
+        
+        session_layout.addLayout(supplier_btn_row)
+        
+        # 호환성을 위한 숨김 콤보박스
+        self.settings_supplier_combo = QComboBox()
+        self.settings_supplier_combo.hide()
+        
+        # 생성된 차수 목록
+        session_list_label = QLabel("📝 생성된 차수 목록:")
+        session_layout.addWidget(session_list_label)
+        
+        self.settings_session_list = QListWidget()
+        self.settings_session_list.setMaximumHeight(150)
+        self.settings_session_list.setStyleSheet("""
+            QListWidget {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #eee;
+            }
+            QListWidget::item:selected {
+                background-color: #E3F2FD;
+                color: #1976D2;
+            }
+        """)
+        session_layout.addWidget(self.settings_session_list)
+        
+        # 차수 관리 버튼들
+        session_btn_row = QHBoxLayout()
+        
+        self.settings_delete_session_btn = QPushButton("🗑️ 선택 차수 삭제")
+        self.settings_delete_session_btn.clicked.connect(self._on_settings_delete_session)
+        session_btn_row.addWidget(self.settings_delete_session_btn)
+        
+        self.settings_clear_sessions_btn = QPushButton("🔄 전체 초기화")
+        self.settings_clear_sessions_btn.setStyleSheet("background-color: #f44336; color: white;")
+        self.settings_clear_sessions_btn.clicked.connect(self._on_settings_clear_sessions)
+        session_btn_row.addWidget(self.settings_clear_sessions_btn)
+        
+        session_btn_row.addStretch()
+        session_layout.addLayout(session_btn_row)
+        
+        scroll_layout.addWidget(session_group)
         
         # ===== 3. BIN 설정 섹션 =====
         bin_group = QGroupBox("🗃️ BIN 설정")
@@ -1537,6 +2173,21 @@ class MainWindow(QMainWindow):
         save_path_row.addWidget(self.settings_save_path_btn)
         path_layout.addLayout(save_path_row)
         
+        # 피킹리스트 차수 선택
+        picking_session_row = QHBoxLayout()
+        picking_session_row.addWidget(QLabel("📋 피킹리스트 차수:"))
+        self.settings_picking_session_combo = QComboBox()
+        self.settings_picking_session_combo.setMinimumWidth(250)
+        self.settings_picking_session_combo.addItem("-- 차수 선택 --", 0)
+        picking_session_row.addWidget(self.settings_picking_session_combo, 1)
+        
+        self.settings_refresh_picking_combo_btn = QPushButton("🔄")
+        self.settings_refresh_picking_combo_btn.setMaximumWidth(40)
+        self.settings_refresh_picking_combo_btn.setToolTip("차수 목록 새로고침")
+        self.settings_refresh_picking_combo_btn.clicked.connect(self._update_settings_picking_session_combo)
+        picking_session_row.addWidget(self.settings_refresh_picking_combo_btn)
+        path_layout.addLayout(picking_session_row)
+        
         # 피킹리스트 관련 버튼
         picking_row = QHBoxLayout()
         self.settings_save_excel_btn = QPushButton("📊 엑셀 저장")
@@ -1555,7 +2206,129 @@ class MainWindow(QMainWindow):
         picking_row.addStretch()
         path_layout.addLayout(picking_row)
         
+        # 저장된 피킹리스트 목록
+        saved_pdf_label = QLabel("📁 저장된 피킹리스트:")
+        path_layout.addWidget(saved_pdf_label)
+        
+        self.settings_saved_pdf_list = QListWidget()
+        self.settings_saved_pdf_list.setMaximumHeight(100)
+        self.settings_saved_pdf_list.setStyleSheet("""
+            QListWidget {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+            }
+            QListWidget::item {
+                padding: 5px;
+            }
+            QListWidget::item:selected {
+                background-color: #E3F2FD;
+            }
+        """)
+        self.settings_saved_pdf_list.itemDoubleClicked.connect(self._on_settings_open_saved_pdf)
+        path_layout.addWidget(self.settings_saved_pdf_list)
+        
         scroll_layout.addWidget(path_group)
+        
+        # ===== 5. 프린터 설정 섹션 =====
+        printer_group = QGroupBox("🖨️ 프린터 설정")
+        printer_layout = QVBoxLayout(printer_group)
+        printer_layout.setSpacing(15)
+        
+        # 라벨 프린터
+        label_printer_row = QHBoxLayout()
+        label_printer_row.addWidget(QLabel("라벨 프린터:"))
+        self.settings_label_printer = QComboBox()
+        self.settings_label_printer.setMinimumWidth(250)
+        label_printer_row.addWidget(self.settings_label_printer, 1)
+        self.settings_label_test_btn = QPushButton("테스트 출력")
+        self.settings_label_test_btn.clicked.connect(self._on_settings_test_label_printer)
+        label_printer_row.addWidget(self.settings_label_test_btn)
+        printer_layout.addLayout(label_printer_row)
+        
+        # A4 프린터
+        a4_printer_row = QHBoxLayout()
+        a4_printer_row.addWidget(QLabel("A4 프린터:"))
+        self.settings_a4_printer = QComboBox()
+        self.settings_a4_printer.setMinimumWidth(250)
+        a4_printer_row.addWidget(self.settings_a4_printer, 1)
+        self.settings_a4_test_btn = QPushButton("테스트 출력")
+        self.settings_a4_test_btn.clicked.connect(self._on_settings_test_a4_printer)
+        a4_printer_row.addWidget(self.settings_a4_test_btn)
+        printer_layout.addLayout(a4_printer_row)
+        
+        # 회전 설정
+        rotation_row = QHBoxLayout()
+        rotation_row.addWidget(QLabel("송장 회전:"))
+        self.settings_rotation = QComboBox()
+        self.settings_rotation.addItems(["0°", "90°", "180°", "270°"])
+        self.settings_rotation.setMaximumWidth(100)
+        self.settings_rotation.currentIndexChanged.connect(self._on_settings_rotation_changed)
+        rotation_row.addWidget(self.settings_rotation)
+        rotation_row.addStretch()
+        printer_layout.addLayout(rotation_row)
+        
+        # 프린터 목록 새로고침
+        refresh_row = QHBoxLayout()
+        refresh_row.addStretch()
+        self.settings_refresh_printers_btn = QPushButton("🔄 프린터 목록 새로고침")
+        self.settings_refresh_printers_btn.clicked.connect(self._on_settings_refresh_printers)
+        refresh_row.addWidget(self.settings_refresh_printers_btn)
+        printer_layout.addLayout(refresh_row)
+        
+        scroll_layout.addWidget(printer_group)
+        
+        # ===== 6. 출력 옵션 섹션 =====
+        output_group = QGroupBox("⚙️ 출력 옵션")
+        output_layout = QVBoxLayout(output_group)
+        output_layout.setSpacing(10)
+        
+        # 첫 번째 줄: EzAuto 관련
+        ezauto_row = QHBoxLayout()
+        ezauto_row.addWidget(QLabel("EzAuto 창 제목:"))
+        self.settings_ezauto_title = QLineEdit()
+        self.settings_ezauto_title.setText("이지오토")
+        self.settings_ezauto_title.setMaximumWidth(100)
+        self.settings_ezauto_title.textChanged.connect(self._on_settings_ezauto_title_changed)
+        ezauto_row.addWidget(self.settings_ezauto_title)
+        ezauto_row.addSpacing(20)
+        
+        self.settings_ezauto_check = QCheckBox("EzAuto 입력")
+        self.settings_ezauto_check.setChecked(True)
+        self.settings_ezauto_check.setToolTip("체크 시 스캔된 바코드를 EzAuto 프로그램에 자동 입력합니다")
+        self.settings_ezauto_check.toggled.connect(self._on_settings_toggle_ezauto)
+        ezauto_row.addWidget(self.settings_ezauto_check)
+        ezauto_row.addStretch()
+        output_layout.addLayout(ezauto_row)
+        
+        # 두 번째 줄: PDF 출력 관련
+        pdf_row = QHBoxLayout()
+        self.settings_pdf_check = QCheckBox("송장(라벨) PDF 출력")
+        self.settings_pdf_check.setChecked(True)
+        self.settings_pdf_check.setToolTip("체크 해제 시 송장 PDF가 출력되지 않습니다 (EzAuto 입력만 할 때 사용)")
+        self.settings_pdf_check.toggled.connect(self._on_settings_toggle_pdf)
+        pdf_row.addWidget(self.settings_pdf_check)
+        pdf_row.addSpacing(20)
+        
+        self.settings_order_sheet_check = QCheckBox("주문서(A4) 동시 출력")
+        self.settings_order_sheet_check.setChecked(False)
+        self.settings_order_sheet_check.setToolTip("체크 시 송장과 함께 주문서 PDF를 A4 프린터로 출력합니다")
+        self.settings_order_sheet_check.toggled.connect(self._on_settings_toggle_order_sheet)
+        pdf_row.addWidget(self.settings_order_sheet_check)
+        pdf_row.addStretch()
+        output_layout.addLayout(pdf_row)
+        
+        # 세 번째 줄: 임시 파일 보관
+        temp_row = QHBoxLayout()
+        self.settings_keep_temp_check = QCheckBox("임시 파일 보관")
+        self.settings_keep_temp_check.setChecked(False)
+        self.settings_keep_temp_check.setToolTip("체크 시 출력 후 추출된 PDF 임시 파일을 삭제하지 않고 보관합니다")
+        self.settings_keep_temp_check.toggled.connect(self._on_settings_toggle_keep_temp)
+        temp_row.addWidget(self.settings_keep_temp_check)
+        temp_row.addStretch()
+        output_layout.addLayout(temp_row)
+        
+        scroll_layout.addWidget(output_group)
         
         # 여백
         scroll_layout.addStretch()
@@ -1605,6 +2378,9 @@ class MainWindow(QMainWindow):
         save_path = settings.get("save_path", "")
         if save_path:
             self.settings_save_path.setText(save_path)
+        
+        # 피킹리스트 차수 콤보박스 업데이트
+        self._update_settings_picking_session_combo()
     
     # ===== 설정 탭 이벤트 핸들러 =====
     
@@ -1700,6 +2476,83 @@ class MainWindow(QMainWindow):
         
         QMessageBox.information(self, "프린터", f"프린터 목록을 새로고침했습니다.\n총 {len(printers)}개 프린터 발견")
     
+    # ===== 출력 옵션 핸들러 =====
+    
+    def _on_settings_ezauto_title_changed(self, title: str):
+        """설정 탭 - EzAuto 창 제목 변경"""
+        self.ezauto.set_window_title(title)
+        # 출고 탭과 동기화
+        if hasattr(self, 'ezauto_title_edit'):
+            self.ezauto_title_edit.blockSignals(True)
+            self.ezauto_title_edit.setText(title)
+            self.ezauto_title_edit.blockSignals(False)
+    
+    def _on_settings_toggle_ezauto(self, checked: bool):
+        """설정 탭 - EzAuto 입력 활성화/비활성화"""
+        self.ezauto.enabled = checked
+        # 출고 탭과 동기화
+        if hasattr(self, 'ezauto_check'):
+            self.ezauto_check.blockSignals(True)
+            self.ezauto_check.setChecked(checked)
+            self.ezauto_check.blockSignals(False)
+        self._add_log(f"EzAuto 입력: {'활성' if checked else '비활성'}")
+    
+    def _on_settings_toggle_pdf(self, checked: bool):
+        """설정 탭 - PDF 출력 활성화/비활성화"""
+        self.pdf_printer.enabled = checked
+        # 출고 탭과 동기화
+        if hasattr(self, 'pdf_check'):
+            self.pdf_check.blockSignals(True)
+            self.pdf_check.setChecked(checked)
+            self.pdf_check.blockSignals(False)
+        self._add_log(f"송장 PDF 출력: {'활성' if checked else '비활성'}")
+    
+    def _on_settings_toggle_order_sheet(self, checked: bool):
+        """설정 탭 - 주문서 출력 활성화/비활성화"""
+        self.pdf_printer.order_sheet_enabled = checked
+        # 출고 탭과 동기화
+        if hasattr(self, 'order_sheet_check'):
+            self.order_sheet_check.blockSignals(True)
+            self.order_sheet_check.setChecked(checked)
+            self.order_sheet_check.blockSignals(False)
+        
+        if checked:
+            # 활성화 시 주문서 PDF 파일 설정 (필수!)
+            order_pdf_path = self.settings_order_pdf_path.text().strip()
+            if order_pdf_path:
+                self.pdf_printer.set_pdf_file_2(order_pdf_path)
+                # 주문서 PDF 인덱싱
+                if self.excel_loader.df is not None:
+                    tracking_numbers = self.excel_loader.get_all_tracking_numbers()
+                    self.pdf_printer.build_tracking_index(tracking_numbers)
+                self._add_log(f"주문서 PDF 설정: {order_pdf_path}")
+            else:
+                self._add_log("⚠️ 주문서 PDF 파일이 설정되지 않았습니다. 데이터 업로드에서 주문서 PDF를 선택하세요.")
+            
+            # A4 프린터 설정 적용
+            a4_printer = self.settings_a4_printer.currentText()
+            if a4_printer and a4_printer != "프린터 없음":
+                self.pdf_printer.set_printer_2(a4_printer)
+                self._add_log(f"주문서 프린터 설정: {a4_printer}")
+            else:
+                self._add_log("⚠️ A4 프린터가 설정되지 않았습니다. 프린터 설정에서 A4 프린터를 선택하세요.")
+            
+            self._add_log("주문서(A4) 동시 출력 활성화됨")
+        else:
+            self.pdf_printer.set_pdf_file_2("")
+            self.pdf_printer.set_printer_2("")
+            self._add_log("주문서(A4) 동시 출력 비활성화됨")
+    
+    def _on_settings_toggle_keep_temp(self, checked: bool):
+        """설정 탭 - 임시 파일 보관 옵션"""
+        self.pdf_printer.keep_temp_files = checked
+        # 출고 탭과 동기화
+        if hasattr(self, 'pdf_keep_temp_check'):
+            self.pdf_keep_temp_check.blockSignals(True)
+            self.pdf_keep_temp_check.setChecked(checked)
+            self.pdf_keep_temp_check.blockSignals(False)
+        self._add_log(f"PDF 임시 파일: {'보관' if checked else '출력 후 삭제'}")
+    
     def _on_settings_save_bin(self):
         """설정 탭 - BIN 설정 저장"""
         max_qty = self.settings_bin_max_qty.value()
@@ -1727,16 +2580,381 @@ class MainWindow(QMainWindow):
         """설정 탭 - 엑셀 저장"""
         self._on_save_excel()
     
+    def _update_settings_picking_session_combo(self):
+        """설정 탭 - 피킹리스트 차수 콤보박스 업데이트"""
+        self.settings_picking_session_combo.blockSignals(True)
+        self.settings_picking_session_combo.clear()
+        
+        sessions = self.session_manager.get_all_sessions()
+        
+        if not sessions:
+            self.settings_picking_session_combo.addItem("-- 생성된 차수 없음 --", 0)
+        else:
+            self.settings_picking_session_combo.addItem("-- 차수 선택 --", 0)
+            for session in sessions:
+                display = f"{session.session_id}차 [{session.supplier_display}] - {session.order_count}건"
+                self.settings_picking_session_combo.addItem(display, session.session_id)
+        
+        self.settings_picking_session_combo.blockSignals(False)
+        
+        # 저장된 PDF 목록도 업데이트
+        self._update_settings_saved_pdf_list()
+    
+    def _update_settings_saved_pdf_list(self):
+        """설정 탭 - 저장된 피킹리스트 PDF 목록 업데이트"""
+        self.settings_saved_pdf_list.clear()
+        
+        # 저장 경로 확인
+        save_path = self.settings_save_path.text().strip()
+        if not save_path:
+            save_path = os.getcwd()
+        
+        # PDF 파일 검색 (피킹리스트 패턴)
+        import glob
+        pdf_patterns = [
+            os.path.join(save_path, "*차*피킹*.pdf"),
+            os.path.join(save_path, "*picking*.pdf"),
+            os.path.join(save_path, "제품별_피킹리스트*.pdf"),
+        ]
+        
+        pdf_files = []
+        for pattern in pdf_patterns:
+            pdf_files.extend(glob.glob(pattern))
+        
+        # 중복 제거 및 최신순 정렬
+        pdf_files = list(set(pdf_files))
+        pdf_files.sort(key=os.path.getmtime, reverse=True)
+        
+        for pdf_path in pdf_files[:10]:  # 최근 10개만 표시
+            filename = os.path.basename(pdf_path)
+            item = QListWidgetItem(f"📄 {filename}")
+            item.setData(Qt.UserRole, pdf_path)
+            item.setToolTip(pdf_path)
+            self.settings_saved_pdf_list.addItem(item)
+        
+        if not pdf_files:
+            item = QListWidgetItem("저장된 피킹리스트가 없습니다")
+            item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
+            item.setForeground(QColor("#999"))
+            self.settings_saved_pdf_list.addItem(item)
+    
     def _on_settings_save_pdf(self):
-        """설정 탭 - 피킹리스트 PDF 저장"""
-        self._on_save_product_pdf()
-        # PDF 저장 후 열기 버튼 활성화
-        if hasattr(self, '_last_pdf_path') and self._last_pdf_path:
-            self.settings_open_pdf_btn.setEnabled(True)
+        """설정 탭 - 피킹리스트 PDF 저장 (차수별)"""
+        # 선택된 차수 확인
+        session_id = self.settings_picking_session_combo.itemData(
+            self.settings_picking_session_combo.currentIndex()
+        )
+        
+        if not session_id or session_id == 0:
+            QMessageBox.warning(self, "알림", "저장할 차수를 선택해주세요.")
+            return
+        
+        session = self.session_manager.get_session(session_id)
+        if not session:
+            QMessageBox.warning(self, "오류", "선택한 차수를 찾을 수 없습니다.")
+            return
+        
+        # 해당 차수의 데이터로 피킹리스트 생성
+        filtered_df = self.excel_loader.get_filtered_by_suppliers(session.suppliers)
+        if filtered_df is None or filtered_df.empty:
+            QMessageBox.warning(self, "오류", "해당 차수의 데이터가 없습니다.")
+            return
+        
+        # 저장 경로
+        save_path = self.settings_save_path.text().strip()
+        if not save_path:
+            save_path = os.getcwd()
+        
+        # 파일명 생성
+        supplier_name = session.supplier_display.replace("/", "_").replace("\\", "_").replace(":", "_").replace(" ", "")
+        if len(supplier_name) > 20:
+            supplier_name = supplier_name[:20]
+        filename = f"{session.session_id}차_{supplier_name}_피킹리스트.pdf"
+        file_path = os.path.join(save_path, filename)
+        
+        try:
+            # BIN 정보 가져오기
+            sku_bin_map = session.sku_bin_map if session.sku_bin_map else self.bin_manager._sku_bin_map
+            
+            from pdf_printer import create_picking_list_pdf
+            success = create_picking_list_pdf(filtered_df, file_path, sku_bin_map)
+            
+            if success:
+                self._last_pdf_path = file_path
+                self.settings_open_pdf_btn.setEnabled(True)
+                self._update_settings_saved_pdf_list()
+                QMessageBox.information(
+                    self, 
+                    "저장 완료", 
+                    f"피킹리스트가 저장되었습니다.\n\n"
+                    f"차수: {session.session_id}차\n"
+                    f"업체: {session.supplier_display}\n"
+                    f"파일: {filename}"
+                )
+                self._add_log(f"[피킹리스트] {session.session_id}차 PDF 저장: {file_path}")
+            else:
+                QMessageBox.warning(self, "오류", "피킹리스트 PDF 저장에 실패했습니다.")
+        except Exception as e:
+            QMessageBox.warning(self, "오류", f"PDF 저장 중 오류: {str(e)}")
     
     def _on_settings_open_pdf(self):
-        """설정 탭 - 피킹리스트 열기"""
-        self._on_open_picking_pdf()
+        """설정 탭 - 마지막 저장된 피킹리스트 열기"""
+        if hasattr(self, '_last_pdf_path') and self._last_pdf_path and os.path.exists(self._last_pdf_path):
+            os.startfile(self._last_pdf_path)
+        else:
+            QMessageBox.information(self, "알림", "열 수 있는 피킹리스트가 없습니다.\n먼저 PDF를 저장해주세요.")
+    
+    def _on_settings_open_saved_pdf(self, item):
+        """설정 탭 - 저장된 피킹리스트 더블클릭 시 열기"""
+        pdf_path = item.data(Qt.UserRole)
+        if pdf_path and os.path.exists(pdf_path):
+            os.startfile(pdf_path)
+        else:
+            QMessageBox.warning(self, "오류", "파일을 찾을 수 없습니다.")
+    
+    # ===== 차수 관리 이벤트 핸들러 =====
+    
+    def _update_settings_supplier_combo(self):
+        """설정 탭 - 업체 리스트 업데이트 (체크박스)"""
+        self.settings_supplier_list.clear()
+        
+        if self.excel_loader.df is None:
+            item = QListWidgetItem("엑셀 로드 후 선택 가능")
+            item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
+            self.settings_supplier_list.addItem(item)
+            self.settings_create_session_btn.setEnabled(False)
+            return
+        
+        # 업체 요약 정보 가져오기
+        supplier_summary = self.excel_loader.get_supplier_summary()
+        
+        if not supplier_summary:
+            item = QListWidgetItem("업체 정보 없음")
+            item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
+            self.settings_supplier_list.addItem(item)
+            self.settings_create_session_btn.setEnabled(False)
+            return
+        
+        # 이미 차수에 할당된 업체 목록 수집
+        assigned_suppliers = set()
+        for session in self.session_manager.sessions.values():
+            for supplier in session.suppliers:
+                assigned_suppliers.add(supplier)
+        
+        # 각 업체별 체크박스 아이템
+        available_count = 0
+        for item_data in supplier_summary:
+            supplier = item_data["supplier"]
+            order_count = item_data["order_count"]
+            item_count = item_data["item_count"]
+            
+            # 이미 할당된 업체인지 확인
+            if supplier in assigned_suppliers:
+                # 이미 할당된 업체 - 비활성화
+                item = QListWidgetItem(f"✅ {supplier} ({order_count}건) - 이미 할당됨")
+                item.setData(Qt.UserRole, supplier)
+                item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
+                item.setForeground(QColor("#999999"))
+            else:
+                # 미할당 업체 - 선택 가능
+                item = QListWidgetItem(f"🏢 {supplier} ({order_count}건, {item_count}개)")
+                item.setData(Qt.UserRole, supplier)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Unchecked)
+                available_count += 1
+            
+            self.settings_supplier_list.addItem(item)
+        
+        # 선택 가능한 업체가 있을 때만 버튼 활성화
+        self.settings_create_session_btn.setEnabled(available_count > 0)
+        
+        # 모든 업체가 차수에 할당된 경우 완료 메시지 표시
+        if available_count == 0 and len(assigned_suppliers) > 0:
+            complete_item = QListWidgetItem("")
+            complete_item.setFlags(complete_item.flags() & ~Qt.ItemIsUserCheckable)
+            self.settings_supplier_list.insertItem(0, complete_item)
+            
+            complete_msg = QListWidgetItem("✅ 차수 관리 완료! 모든 업체가 등록되었습니다.")
+            complete_msg.setFlags(complete_msg.flags() & ~Qt.ItemIsUserCheckable)
+            complete_msg.setForeground(QColor("#2ecc71"))
+            self.settings_supplier_list.insertItem(0, complete_msg)
+    
+    def _on_settings_select_all_suppliers(self):
+        """설정 탭 - 전체 업체 선택"""
+        for i in range(self.settings_supplier_list.count()):
+            item = self.settings_supplier_list.item(i)
+            if item.flags() & Qt.ItemIsUserCheckable:
+                item.setCheckState(Qt.Checked)
+    
+    def _on_settings_deselect_all_suppliers(self):
+        """설정 탭 - 전체 업체 해제"""
+        for i in range(self.settings_supplier_list.count()):
+            item = self.settings_supplier_list.item(i)
+            if item.flags() & Qt.ItemIsUserCheckable:
+                item.setCheckState(Qt.Unchecked)
+    
+    def _get_selected_suppliers(self) -> list:
+        """설정 탭 - 선택된 업체 목록 가져오기"""
+        selected = []
+        for i in range(self.settings_supplier_list.count()):
+            item = self.settings_supplier_list.item(i)
+            if item.checkState() == Qt.Checked:
+                supplier = item.data(Qt.UserRole)
+                if supplier:
+                    selected.append(supplier)
+        return selected
+    
+    def _update_settings_session_list(self):
+        """설정 탭 - 차수 목록 업데이트"""
+        self.settings_session_list.clear()
+        
+        for session_id, display_name in self.session_manager.get_session_choices():
+            session = self.session_manager.sessions.get(session_id)
+            if session:
+                item_text = f"{session_id}차: {session.supplier_display} ({session.order_count}건, {session.sku_count} SKU)"
+                item = QListWidgetItem(item_text)
+                item.setData(Qt.UserRole, session_id)
+                self.settings_session_list.addItem(item)
+    
+    def _on_settings_create_session(self):
+        """설정 탭 - 차수 생성"""
+        selected_suppliers = self._get_selected_suppliers()
+        
+        if not selected_suppliers:
+            QMessageBox.warning(self, "경고", "최소 1개 이상의 업체를 선택하세요.")
+            return
+        
+        # 업체 필터 적용
+        supplier_summary = self.excel_loader.get_supplier_summary()
+        all_suppliers = [s["supplier"] for s in supplier_summary]
+        
+        if len(selected_suppliers) == len(all_suppliers):
+            # 전체 선택
+            self.excel_loader.filter_by_supplier(all_suppliers)
+            supplier_display = f"전체 ({', '.join(all_suppliers)})"
+            suppliers = all_suppliers
+        elif len(selected_suppliers) > 1:
+            # 다중 업체 - 업체명도 표시
+            self.excel_loader.filter_by_supplier(selected_suppliers)
+            supplier_display = f"{len(selected_suppliers)}개 업체 ({', '.join(selected_suppliers)})"
+            suppliers = selected_suppliers
+        else:
+            # 단일 업체
+            self.excel_loader.filter_by_supplier(selected_suppliers[0])
+            supplier_display = selected_suppliers[0]
+            suppliers = selected_suppliers
+        
+        # BIN 할당
+        if self.excel_loader.df is not None:
+            # BIN 설정 로드 및 적용
+            bin_settings = load_bin_settings()
+            self.bin_manager.set_config(
+                max_qty_per_bin=bin_settings.get("max_qty_per_bin", 100),
+                min_qty_threshold=bin_settings.get("min_qty_threshold", 10),
+                max_sku_per_shared_bin=bin_settings.get("max_sku_per_shared_bin", 5),
+                dedicated_qty_threshold=bin_settings.get("dedicated_qty_threshold", 0)
+            )
+            # BIN 리셋 후 배정
+            self.bin_manager.reset()
+            self.bin_manager.assign_bins_from_dataframe(self.excel_loader.df)
+            self.bin_manager.build_order_bin_map(self.excel_loader.df)
+        
+        # 세션 생성
+        filtered_df = self.excel_loader.df
+        order_count = len(filtered_df['tracking_no'].unique()) if filtered_df is not None else 0
+        sku_count = len(filtered_df['barcode'].unique()) if filtered_df is not None else 0
+        bin_count = self.bin_manager.get_bin_count()
+        
+        session = self.session_manager.create_session(
+            suppliers=suppliers,
+            supplier_display=supplier_display,
+            order_count=order_count,
+            sku_count=sku_count,
+            bin_count=bin_count,
+            sku_bin_map=self.bin_manager._sku_bin_map.copy()
+        )
+        
+        # 작업 차수 업데이트
+        self._work_session = session.session_id
+        self._work_session_supplier = supplier_display
+        
+        # UI 업데이트
+        self._update_session_display()
+        self._update_session_combo()
+        self._update_settings_session_list()
+        self._update_settings_supplier_combo()  # 업체 목록 새로고침 (중복 방지)
+        self._update_settings_picking_session_combo()  # 피킹리스트 차수 콤보박스 업데이트
+        self._update_tables()
+        
+        QMessageBox.information(
+            self, 
+            "차수 생성", 
+            f"{session.session_id}차 작업이 생성되었습니다.\n\n"
+            f"업체: {supplier_display}\n"
+            f"주문: {order_count}건\n"
+            f"SKU: {sku_count}종\n"
+            f"BIN: {bin_count}개"
+        )
+        
+        self._add_log(f"<b style='color:#4CAF50'>[차수 생성] {session.session_id}차 - {supplier_display} ({order_count}건)</b>", html=True)
+    
+    def _on_settings_delete_session(self):
+        """설정 탭 - 선택 차수 삭제"""
+        current_item = self.settings_session_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "경고", "삭제할 차수를 선택하세요.")
+            return
+        
+        session_id = current_item.data(Qt.UserRole)
+        
+        reply = QMessageBox.question(
+            self,
+            "차수 삭제",
+            f"{session_id}차 작업을 삭제하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # delete_session 메서드 사용
+            if self.session_manager.delete_session(session_id):
+                self._update_session_combo()
+                self._update_settings_session_list()
+                self._update_settings_supplier_combo()  # 업체 목록 새로고침 (삭제된 업체 다시 선택 가능)
+                self._update_settings_picking_session_combo()  # 피킹리스트 차수 콤보박스 업데이트
+                self._update_session_display()
+                self._add_log(f"[차수 삭제] {session_id}차 작업이 삭제되었습니다.")
+    
+    def _on_settings_clear_sessions(self):
+        """설정 탭 - 전체 차수 초기화"""
+        if not self.session_manager.sessions:
+            QMessageBox.information(self, "알림", "삭제할 차수가 없습니다.")
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "전체 초기화",
+            "모든 작업 차수를 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self.session_manager.clear_all_sessions()
+            # 모든 세션 ID 초기화
+            self._work_session = 0
+            self._work_session_supplier = ""
+            self._shipment_session_id = 0
+            self._fp_session_id = 0
+            self._pp_session_id = 0
+            # UI 업데이트
+            self._update_session_display()
+            self._update_session_combo()
+            self._update_settings_session_list()
+            self._update_settings_supplier_combo()  # 업체 목록 새로고침 (모든 업체 다시 선택 가능)
+            self._update_settings_picking_session_combo()  # 피킹리스트 차수 콤보박스 업데이트
+            self._update_fp_session_info()
+            if hasattr(self, 'pp_session_label'):
+                self._update_pp_session_info()
+            self._add_log("[차수] 모든 작업 차수가 초기화되었습니다.")
     
     def _refresh_printer_combos(self):
         """출고 탭 프린터 콤보박스 새로고침"""
@@ -1890,6 +3108,91 @@ class MainWindow(QMainWindow):
         self.pre_pick_engine.slot_state_changed.connect(self._on_pp_slot_state_changed)
         self.pre_pick_engine.log_message.connect(self._add_pp_log)
         self.pre_pick_engine.error_occurred.connect(self._on_pp_error)
+    
+    # ===== 미리피킹 차수 관련 함수 =====
+    
+    def _on_refresh_pp_session(self):
+        """미리피킹 탭 - 차수 선택 해제 및 새로고침"""
+        # 세션 선택 해제
+        self._pp_session_id = 0
+        
+        # 콤보박스 초기화
+        self.pp_session_combo.blockSignals(True)
+        self.pp_session_combo.setCurrentIndex(0)
+        self.pp_session_combo.blockSignals(False)
+        
+        # UI 업데이트
+        self._update_pp_session_combo()
+        self._update_pp_session_info()
+        
+        self._add_pp_log("[미리피킹] 차수 선택이 해제되었습니다.")
+    
+    def _update_pp_session_combo(self):
+        """미리피킹 세션 드롭다운 업데이트 (독립적)"""
+        self.pp_session_combo.blockSignals(True)
+        self.pp_session_combo.clear()
+        
+        sessions = self.session_manager.get_all_sessions()
+        
+        if not sessions:
+            self.pp_session_combo.addItem("-- 설정 탭에서 차수 생성 필요 --", 0)
+        else:
+            self.pp_session_combo.addItem("-- 작업 차수 선택 --", 0)
+            for session_id, display_name in self.session_manager.get_session_choices():
+                self.pp_session_combo.addItem(display_name, session_id)
+        
+        # 미리피킹 탭 자체 세션 ID 기반으로 선택
+        if self._pp_session_id > 0:
+            for i in range(self.pp_session_combo.count()):
+                if self.pp_session_combo.itemData(i) == self._pp_session_id:
+                    self.pp_session_combo.setCurrentIndex(i)
+                    break
+        
+        self.pp_session_combo.blockSignals(False)
+        self._update_pp_session_info()
+    
+    def _update_pp_session_info(self):
+        """미리피킹 세션 정보 업데이트 (독립적)"""
+        # 미리피킹 탭 자체 세션 ID 기반으로 정보 표시
+        session = self.session_manager.get_session(self._pp_session_id) if self._pp_session_id > 0 else None
+        
+        if session:
+            self.pp_session_label.setText(f"{session.session_id}차")
+            self.pp_supplier_label.setText(session.supplier_display)
+            self.pp_data_status.setText(f"{session.order_count}건, {session.sku_count} SKU")
+        else:
+            self.pp_session_label.setText("미선택")
+            self.pp_supplier_label.setText("업체 미선택")
+            self.pp_data_status.setText("차수 선택 필요")
+    
+    @Slot(int)
+    def _on_pp_session_combo_changed(self, index: int):
+        """미리피킹 세션 드롭다운 변경 (독립적)"""
+        session_id = self.pp_session_combo.itemData(index)
+        if session_id and session_id > 0:
+            self._pp_session_id = session_id
+            session = self.session_manager.get_session(session_id)
+            if session:
+                self._load_pp_session(session)
+    
+    def _load_pp_session(self, session):
+        """미리피킹 세션 로드 (독립적 - 다른 탭에 영향 없음)"""
+        # 미리피킹 전용 세션 ID 저장
+        self._pp_session_id = session.session_id
+        
+        # 미리피킹 탭 전용: 세션의 업체 기반으로 데이터 필터링
+        if session.suppliers:
+            # 임시로 필터 적용 (미리피킹 엔진 용)
+            filtered_df = self.excel_loader.get_filtered_by_suppliers(session.suppliers)
+            if filtered_df is not None:
+                self.pre_pick_engine.set_data_source(filtered_df, self.bin_manager)
+        
+        # 미리피킹 UI만 업데이트
+        self.pp_session_label.setText(f"{session.session_id}차")
+        self.pp_supplier_label.setText(session.supplier_display)
+        self.pp_data_status.setText(f"{session.order_count}건, {session.sku_count} SKU")
+        
+        self._add_pp_log(f"[미리피킹] {session.session_id}차 작업 선택 - {session.supplier_display}")
     
     # ===== 미리피킹 UI 이벤트 핸들러 =====
     
@@ -2213,6 +3516,91 @@ class MainWindow(QMainWindow):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.fp_log.append(f"[{timestamp}] {message}")
     
+    def _add_fp_scan_history(self, barcode: str, total_qty: int, bin_count: int, status: str, scan_time: str):
+        """스캔 히스토리에 추가 (최근 스캔이 최상단)"""
+        # 이미 같은 바코드가 있으면 제거 (최신으로 갱신)
+        self._fp_scan_history = [(b, q, c, s, t) for b, q, c, s, t in self._fp_scan_history if b != barcode]
+        
+        # 최상단에 추가
+        self._fp_scan_history.insert(0, (barcode, total_qty, bin_count, status, scan_time))
+        
+        # 최대 20개까지만 유지
+        if len(self._fp_scan_history) > 20:
+            self._fp_scan_history = self._fp_scan_history[:20]
+        
+        # 테이블 갱신
+        self._refresh_fp_scan_history_table()
+    
+    def _update_fp_scan_history_status(self, barcode: str, new_status: str):
+        """스캔 히스토리 상태 업데이트"""
+        for i, (b, q, c, s, t) in enumerate(self._fp_scan_history):
+            if b == barcode:
+                self._fp_scan_history[i] = (b, q, c, new_status, t)
+                break
+        self._refresh_fp_scan_history_table()
+    
+    def _refresh_fp_scan_history_table(self):
+        """스캔 히스토리 테이블 갱신"""
+        self.fp_scan_history_table.setRowCount(len(self._fp_scan_history))
+        
+        for row, (barcode, total_qty, bin_count, status, scan_time) in enumerate(self._fp_scan_history):
+            # SKU 바코드
+            barcode_item = QTableWidgetItem(barcode)
+            barcode_item.setFont(QFont("Consolas", 10, QFont.Bold))
+            self.fp_scan_history_table.setItem(row, 0, barcode_item)
+            
+            # 총 수량
+            qty_item = QTableWidgetItem(f"{total_qty}개")
+            qty_item.setTextAlignment(Qt.AlignCenter)
+            qty_item.setBackground(QColor("#E1BEE7"))
+            self.fp_scan_history_table.setItem(row, 1, qty_item)
+            
+            # BIN 수
+            bin_item = QTableWidgetItem(f"{bin_count}")
+            bin_item.setTextAlignment(Qt.AlignCenter)
+            self.fp_scan_history_table.setItem(row, 2, bin_item)
+            
+            # 상태
+            status_item = QTableWidgetItem(status)
+            status_item.setTextAlignment(Qt.AlignCenter)
+            if "완료" in status:
+                status_item.setBackground(QColor("#C8E6C9"))  # 연녹색
+            elif "진행" in status:
+                status_item.setBackground(QColor("#FFF9C4"))  # 연노랑
+            self.fp_scan_history_table.setItem(row, 3, status_item)
+            
+            # 시간
+            time_item = QTableWidgetItem(scan_time)
+            time_item.setTextAlignment(Qt.AlignCenter)
+            self.fp_scan_history_table.setItem(row, 4, time_item)
+            
+            # 첫 번째 행(현재 진행중)은 하이라이트
+            if row == 0 and "진행" in status:
+                for col in range(5):
+                    item = self.fp_scan_history_table.item(row, col)
+                    if item:
+                        item.setBackground(QColor("#BBDEFB"))  # 연파랑
+    
+    def _on_fp_history_item_clicked(self, item):
+        """히스토리 항목 클릭 - 해당 SKU 정보 표시"""
+        row = item.row()
+        if row < len(self._fp_scan_history):
+            barcode, total_qty, bin_count, status, _ = self._fp_scan_history[row]
+            self._add_fp_log(f"[히스토리] {barcode}: {total_qty}개, {bin_count} BIN ({status})")
+    
+    def _on_fp_clear_history(self):
+        """스캔 히스토리 초기화"""
+        reply = QMessageBox.question(
+            self, "확인",
+            "스캔 히스토리를 초기화하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self._fp_scan_history = []
+            self.fp_scan_history_table.setRowCount(0)
+            self._add_fp_log("[히스토리] 초기화됨")
+    
     @Slot()
     def _on_fp_toggle_server(self):
         """ESP32 서버 시작/중지"""
@@ -2318,6 +3706,12 @@ class MainWindow(QMainWindow):
         self.fp_cancel_btn.setEnabled(True)
         self.fp_manual_complete_btn.setEnabled(True)
         self._add_fp_log(f"피킹 시작: {barcode} (총 {total_qty}개)")
+        
+        # ★ 스캔 히스토리에 추가 (최근 스캔이 최상단)
+        from datetime import datetime
+        current_time = datetime.now().strftime("%H:%M:%S")
+        bin_count = len(self.full_pick_engine.current_session.bins) if self.full_pick_engine.current_session else 0
+        self._add_fp_scan_history(barcode, total_qty, bin_count, "진행중", current_time)
     
     @Slot(list)
     def _on_fp_bin_list_ready(self, bin_list: list):
@@ -2404,6 +3798,9 @@ class MainWindow(QMainWindow):
         self.fp_manual_complete_btn.setEnabled(False)
         self._add_fp_log(f"SKU 피킹 완료: {barcode} (총 {total_qty}개)")
         
+        # ★ 스캔 히스토리 상태 업데이트
+        self._update_fp_scan_history_status(barcode, "✅ 완료")
+        
         QMessageBox.information(
             self,
             "피킹 완료",
@@ -2448,6 +3845,7 @@ class MainWindow(QMainWindow):
     def _on_fp_cancel_session(self):
         """현재 세션 취소"""
         if self.full_pick_engine.current_session:
+            barcode = self.full_pick_engine.current_session.barcode
             reply = QMessageBox.question(
                 self,
                 "세션 취소",
@@ -2461,6 +3859,9 @@ class MainWindow(QMainWindow):
                 self.fp_total_qty.setText("총 수량: 0개")
                 self._update_fp_progress()
                 self._add_fp_log("피킹 세션 취소됨")
+                
+                # ★ 스캔 히스토리 상태 업데이트
+                self._update_fp_scan_history_status(barcode, "❌ 취소")
     
     @Slot()
     def _on_fp_manual_complete(self):
@@ -2550,53 +3951,57 @@ class MainWindow(QMainWindow):
             )
     
     def _update_fp_session_info(self):
-        """전체피킹 탭의 작업 차수/업체 정보 업데이트"""
-        # 작업 차수
-        if self._work_session > 0:
-            self.fp_session_label.setText(f"{self._work_session}차 피킹")
+        """전체피킹 탭의 작업 차수/업체 정보 업데이트 (독립적)"""
+        # 전체피킹 탭 자체 세션 ID 기반으로 정보 표시
+        session = self.session_manager.get_session(self._fp_session_id) if self._fp_session_id > 0 else None
+        
+        if session:
+            self.fp_session_label.setText(f"{session.session_id}차 피킹")
+            self.fp_supplier_label.setText(session.supplier_display)
+            self.fp_data_status.setText(f"{session.order_count}건, {session.sku_count} SKU")
         else:
             self.fp_session_label.setText("미선택")
-        
-        # 현재 업체
-        if self._work_session_supplier:
-            self.fp_supplier_label.setText(self._work_session_supplier)
-        else:
-            supplier = self.excel_loader.get_current_supplier()
-            if supplier:
-                self.fp_supplier_label.setText(supplier)
-            else:
-                self.fp_supplier_label.setText("업체 미선택")
-        
-        # 데이터 상태
-        if self.excel_loader.df is not None:
-            order_count = self.excel_loader.get_filtered_order_count()
-            sku_count = len(self.excel_loader.df['barcode'].unique()) if 'barcode' in self.excel_loader.df.columns else 0
-            self.fp_data_status.setText(f"{order_count}건, {sku_count} SKU")
-        else:
-            self.fp_data_status.setText("엑셀 미로드")
+            self.fp_supplier_label.setText("업체 미선택")
+            self.fp_data_status.setText("차수 선택 필요")
         
         # 드롭다운도 업데이트
         self._update_fp_session_combo()
     
+    def _on_refresh_fp_session(self):
+        """전체피킹 탭 - 차수 선택 해제 및 새로고침"""
+        # 세션 선택 해제
+        self._fp_session_id = 0
+        
+        # 콤보박스 초기화
+        self.fp_session_combo.blockSignals(True)
+        self.fp_session_combo.setCurrentIndex(0)
+        self.fp_session_combo.blockSignals(False)
+        
+        # UI 업데이트
+        self._update_fp_session_combo()
+        self._update_fp_session_info()
+        
+        self._add_fp_log("[전체피킹] 차수 선택이 해제되었습니다.")
+    
     def _update_fp_session_combo(self):
-        """전체피킹 탭의 세션 드롭다운 업데이트"""
+        """전체피킹 탭의 세션 드롭다운 업데이트 (독립적)"""
         self.fp_session_combo.blockSignals(True)
         self.fp_session_combo.clear()
         
         sessions = self.session_manager.get_all_sessions()
         
         if not sessions:
-            self.fp_session_combo.addItem("-- 출고 탭에서 업체 선택 필요 --", 0)
+            self.fp_session_combo.addItem("-- 설정 탭에서 차수 생성 필요 --", 0)
         else:
             self.fp_session_combo.addItem("-- 작업 차수 선택 --", 0)
             for session in sessions:
                 display = f"{session.session_id}차 [{session.supplier_display}] - {session.order_count}건, {session.sku_count} SKU"
                 self.fp_session_combo.addItem(display, session.session_id)
         
-        # 현재 세션 선택
-        if self.session_manager.current_session:
+        # 전체피킹 탭 자체 세션 ID 기반으로 선택
+        if self._fp_session_id > 0:
             for i in range(self.fp_session_combo.count()):
-                if self.fp_session_combo.itemData(i) == self.session_manager.current_session.session_id:
+                if self.fp_session_combo.itemData(i) == self._fp_session_id:
                     self.fp_session_combo.setCurrentIndex(i)
                     break
         
@@ -2604,40 +4009,33 @@ class MainWindow(QMainWindow):
     
     @Slot(int)
     def _on_fp_session_combo_changed(self, index: int):
-        """전체피킹 탭 세션 드롭다운 변경"""
+        """전체피킹 탭 세션 드롭다운 변경 (독립적)"""
         session_id = self.fp_session_combo.itemData(index)
         if session_id and session_id > 0:
-            session = self.session_manager.select_session(session_id)
+            self._fp_session_id = session_id
+            session = self.session_manager.get_session(session_id)
             if session:
                 self._load_fp_session(session)
     
     def _load_fp_session(self, session: WorkSession):
-        """전체피킹용 세션 로드"""
-        # 업체 필터 적용
-        if session.suppliers:
-            if len(session.suppliers) == 1:
-                self.excel_loader.filter_by_supplier(session.suppliers[0])
-            else:
-                self.excel_loader.filter_by_supplier(session.suppliers)
+        """전체피킹용 세션 로드 (독립적 - 다른 탭에 영향 없음)"""
+        # 전체피킹 전용 세션 ID 저장
+        self._fp_session_id = session.session_id
         
-        # 작업 차수 업데이트
-        self._work_session = session.session_id
-        self._work_session_supplier = session.supplier_display
+        # 전체피킹 탭 전용 데이터 필터 적용 (출고 탭에 영향 없음)
+        # excel_loader를 직접 변경하지 않고, 필요 시 세션 기반으로 데이터 조회
         
         # BIN 매핑 복원 (있는 경우)
         if session.sku_bin_map:
             self.bin_manager._sku_bin_map = session.sku_bin_map.copy()
             self.bin_manager._initialized = True
         
-        # UI 업데이트
+        # 전체피킹 UI만 업데이트
         self.fp_session_label.setText(f"{session.session_id}차 피킹")
         self.fp_supplier_label.setText(session.supplier_display)
         self.fp_data_status.setText(f"{session.order_count}건, {session.sku_count} SKU")
         
-        # 출고 탭 UI도 동기화
-        self._update_session_display()
-        
-        self._add_fp_log(f"[세션 로드] {session.session_id}차 작업 - {session.supplier_display}")
+        self._add_fp_log(f"[전체피킹] {session.session_id}차 작업 선택 - {session.supplier_display}")
         self._add_fp_log(f"  → {session.order_count}건, {session.sku_count} SKU, {session.bin_count} BIN")
     
     @Slot()
@@ -3078,114 +4476,89 @@ class MainWindow(QMainWindow):
         # self.reprint_input.clear()
     
     def _create_top_section(self) -> QGroupBox:
-        """상단 섹션: 파일 로드 및 설정"""
-        group = QGroupBox("설정")
+        """상단 섹션: 작업 옵션 (파일 설정은 설정 탭에서)"""
+        group = QGroupBox("작업 옵션")
         layout = QHBoxLayout(group)
-        layout.setSpacing(5)  # 요소간 간격 줄임
+        layout.setSpacing(10)
         
-        # 엑셀 파일 경로
-        layout.addWidget(QLabel("엑셀:"))
-        self.excel_path_edit = QLineEdit()
-        self.excel_path_edit.setPlaceholderText("엑셀 파일 선택")
-        self.excel_path_edit.setMaximumWidth(180)
-        layout.addWidget(self.excel_path_edit)
+        # 설정 탭 이동 버튼
+        settings_btn = QPushButton("⚙️ 파일/차수/프린터 설정")
+        settings_btn.setStyleSheet("background-color: #607D8B; color: white; font-weight: bold;")
+        settings_btn.setToolTip("엑셀, PDF 파일 선택, 업체/차수 관리, 프린터 설정은 설정 탭에서 관리합니다")
+        settings_btn.clicked.connect(self._on_go_to_settings_tab)
+        layout.addWidget(settings_btn)
         
-        # 찾아보기 버튼
-        self.browse_btn = QPushButton("찾아보기")
-        self.browse_btn.clicked.connect(self._on_browse_excel)
-        layout.addWidget(self.browse_btn)
-        
-        # 로드 버튼
-        self.load_btn = QPushButton("불러오기")
-        self.load_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
-        self.load_btn.clicked.connect(self._on_load_excel)
-        layout.addWidget(self.load_btn)
+        layout.addSpacing(10)
         
         # 구성 요약 버튼
         self.summary_btn = QPushButton("📦 구성요약")
         self.summary_btn.clicked.connect(self._on_show_summary)
         layout.addWidget(self.summary_btn)
         
-        # 업체 변경 버튼
-        self.supplier_btn = QPushButton("🏢 업체변경")
+        # 호환성 유지용 숨김 버튼
+        self.supplier_btn = QPushButton()
         self.supplier_btn.clicked.connect(self._on_change_supplier)
-        self.supplier_btn.setToolTip("다른 업체(공급처)로 변경")
-        layout.addWidget(self.supplier_btn)
+        self.supplier_btn.hide()
         
-        layout.addSpacing(15)
+        layout.addStretch()
         
-        # PDF 파일 경로
-        layout.addWidget(QLabel("PDF:"))
-        self.pdf_path_edit = QLineEdit()
-        self.pdf_path_edit.setPlaceholderText("PDF 선택")
-        self.pdf_path_edit.setMaximumWidth(180)
-        layout.addWidget(self.pdf_path_edit)
-        
-        # PDF 파일 찾아보기 버튼
-        self.pdf_browse_btn = QPushButton("파일 선택")
-        self.pdf_browse_btn.clicked.connect(self._on_browse_pdf_file)
-        layout.addWidget(self.pdf_browse_btn)
-        
-        layout.addSpacing(15)
-        
-        # 스캐너 시작/중지 버튼 제거 (자동 시작으로 변경)
-        # self.scanner_btn = QPushButton("스캐너 시작")
-        # self.scanner_btn.setCheckable(True)
-        # self.scanner_btn.clicked.connect(self._on_toggle_scanner)
-        # self.scanner_btn.setMinimumWidth(100)
-        # layout.addWidget(self.scanner_btn)
-        
+        # ===== 숨김 위젯 (설정 탭으로 이동됨, 호환성 유지용) =====
         # EzAuto 창 제목
-        layout.addWidget(QLabel("창 제목:"))
         self.ezauto_title_edit = QLineEdit()
         self.ezauto_title_edit.setText("이지오토")
-        self.ezauto_title_edit.setMaximumWidth(80)
         self.ezauto_title_edit.textChanged.connect(self._on_ezauto_title_changed)
-        layout.addWidget(self.ezauto_title_edit)
+        self.ezauto_title_edit.hide()
         
         # EzAuto 활성화
         self.ezauto_check = QCheckBox("EzAuto 입력")
         self.ezauto_check.setChecked(True)
         self.ezauto_check.toggled.connect(self._on_toggle_ezauto)
-        layout.addWidget(self.ezauto_check)
+        self.ezauto_check.hide()
         
         # PDF 출력 활성화
         self.pdf_check = QCheckBox("PDF 출력")
         self.pdf_check.setChecked(True)
         self.pdf_check.toggled.connect(self._on_toggle_pdf)
-        layout.addWidget(self.pdf_check)
+        self.pdf_check.hide()
         
         # PDF 임시 파일 보관 옵션
         self.pdf_keep_temp_check = QCheckBox("임시 파일 보관")
-        self.pdf_keep_temp_check.setChecked(False)  # 기본값: 삭제
-        self.pdf_keep_temp_check.setToolTip("체크 시 출력 후 임시 PDF 파일을 보관합니다 (기본: 출력 후 삭제)")
+        self.pdf_keep_temp_check.setChecked(False)
         self.pdf_keep_temp_check.toggled.connect(self._on_toggle_pdf_keep_temp)
-        layout.addWidget(self.pdf_keep_temp_check)
-        
-        layout.addSpacing(15)
+        self.pdf_keep_temp_check.hide()
         
         # 주문서 출력 기능
         self.order_sheet_check = QCheckBox("주문서출력")
         self.order_sheet_check.setChecked(False)
-        self.order_sheet_check.setToolTip("체크 시 두 번째 PDF 파일을 다른 프린터로 동시 출력합니다")
         self.order_sheet_check.toggled.connect(self._on_toggle_order_sheet)
-        layout.addWidget(self.order_sheet_check)
+        self.order_sheet_check.hide()
         
-        # 주문서 PDF 파일 경로 (체크박스 활성화 시에만 표시)
+        # ===== 숨김 위젯 (호환성 유지용) =====
+        hidden_widget = QWidget()
+        hidden_layout = QHBoxLayout(hidden_widget)
+        hidden_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.excel_path_edit = QLineEdit()
+        self.pdf_path_edit = QLineEdit()
         self.pdf_path_2_edit = QLineEdit()
-        self.pdf_path_2_edit.setPlaceholderText("주문서 PDF 선택")
-        self.pdf_path_2_edit.setMaximumWidth(180)
-        self.pdf_path_2_edit.setEnabled(False)
-        layout.addWidget(self.pdf_path_2_edit)
-        
-        # 주문서 PDF 파일 찾아보기 버튼
-        self.pdf_browse_2_btn = QPushButton("주문서 선택")
-        self.pdf_browse_2_btn.setEnabled(False)
+        self.browse_btn = QPushButton()
+        self.browse_btn.clicked.connect(self._on_browse_excel)
+        self.load_btn = QPushButton()
+        self.load_btn.clicked.connect(self._on_load_excel)
+        self.pdf_browse_btn = QPushButton()
+        self.pdf_browse_btn.clicked.connect(self._on_browse_pdf_file)
+        self.pdf_browse_2_btn = QPushButton()
         self.pdf_browse_2_btn.clicked.connect(self._on_browse_pdf_file_2)
-        layout.addWidget(self.pdf_browse_2_btn)
         
-        # 오른쪽 여백 (창 최대화 시 벌어짐 방지)
-        layout.addStretch()
+        hidden_layout.addWidget(self.excel_path_edit)
+        hidden_layout.addWidget(self.pdf_path_edit)
+        hidden_layout.addWidget(self.pdf_path_2_edit)
+        hidden_layout.addWidget(self.browse_btn)
+        hidden_layout.addWidget(self.load_btn)
+        hidden_layout.addWidget(self.pdf_browse_btn)
+        hidden_layout.addWidget(self.pdf_browse_2_btn)
+        hidden_widget.hide()
+        layout.addWidget(hidden_widget)
         
         return group
     
@@ -3237,6 +4610,13 @@ class MainWindow(QMainWindow):
         self.priority_combo_radio.toggled.connect(self._on_priority_changed)
         single_combo_group.addButton(self.priority_combo_radio, 1)
         single_combo_layout.addWidget(self.priority_combo_radio)
+        
+        # 유형 무관 옵션 추가
+        self.priority_no_type_radio = QRadioButton("유형 무관")
+        self.priority_no_type_radio.setChecked(False)
+        self.priority_no_type_radio.toggled.connect(self._on_priority_changed)
+        single_combo_group.addButton(self.priority_no_type_radio, 2)
+        single_combo_layout.addWidget(self.priority_no_type_radio)
         
         single_combo_layout.addStretch()
         grid.addLayout(single_combo_layout, 0, 0, 1, 2)
@@ -3483,18 +4863,45 @@ class MainWindow(QMainWindow):
         right_group = QGroupBox("📦 남은 수량")
         right_layout = QVBoxLayout(right_group)
         
-        # 수동 바코드 입력
-        manual_layout = QHBoxLayout()
+        # 바코드 스캔 입력 (반응형 레이아웃)
+        scan_group = QGroupBox("📦 바코드 스캔")
+        scan_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+                font-weight: bold;
+                border: 2px solid #2196F3;
+                border-radius: 8px;
+                margin-top: 8px;
+                padding: 8px;
+                padding-top: 20px;
+                background-color: #E3F2FD;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+                color: #2196F3;
+            }
+        """)
+        scan_group.setMaximumHeight(80)
+        scan_layout = QHBoxLayout(scan_group)
+        scan_layout.setContentsMargins(5, 5, 5, 5)
+        scan_layout.setSpacing(5)
+        
         self.manual_barcode_edit = QLineEdit()
-        self.manual_barcode_edit.setPlaceholderText("수동 바코드 입력")
+        self.manual_barcode_edit.setPlaceholderText("바코드 스캔/입력")
+        self.manual_barcode_edit.setFont(QFont("Arial", 12))
+        self.manual_barcode_edit.setMinimumHeight(35)
         self.manual_barcode_edit.returnPressed.connect(self._on_manual_scan)
-        manual_layout.addWidget(self.manual_barcode_edit)
+        scan_layout.addWidget(self.manual_barcode_edit, 1)
         
         self.manual_scan_btn = QPushButton("스캔")
+        self.manual_scan_btn.setMinimumHeight(35)
+        self.manual_scan_btn.setFixedWidth(60)
         self.manual_scan_btn.clicked.connect(self._on_manual_scan)
-        manual_layout.addWidget(self.manual_scan_btn)
+        scan_layout.addWidget(self.manual_scan_btn)
         
-        right_layout.addLayout(manual_layout)
+        right_layout.addWidget(scan_group)
         
         # 탭으로 구성별/제품별 구분
         from PySide6.QtWidgets import QTabWidget
@@ -3722,13 +5129,38 @@ class MainWindow(QMainWindow):
         """PDF 인덱싱 완료"""
         if count > 0:
             self._add_log(f"PDF 인덱스: {count}개 송장번호")
+            # 상태 표시 업데이트
+            if hasattr(self, 'status_pdf'):
+                self.status_pdf.setText(f"PDF: {count}개")
+                self.status_pdf.setStyleSheet("color: green;")
+        else:
+            self._add_log("⚠️ [경고] PDF에서 송장번호를 찾지 못했습니다!")
+            self._add_log("   → PDF 파일이 텍스트 선택 가능한 형식인지 확인하세요.")
+            self._add_log("   → 또는 '📑 PDF 재스캔' 버튼을 눌러 다시 시도하세요.")
+            if hasattr(self, 'status_pdf'):
+                self.status_pdf.setText("PDF: 인덱스 없음")
+                self.status_pdf.setStyleSheet("color: red;")
     
     @Slot(int)
     def _on_tab_changed(self, index: int):
-        """탭 전환 이벤트"""
-        # 전체피킹 탭(인덱스 2)으로 전환 시 정보 업데이트
-        if index == 2:  # 전체피킹 탭
+        """탭 전환 이벤트 - 각 탭의 스캔 입력에 포커스"""
+        # 탭 순서: 출고(0), 전체피킹(1), 미리피킹(2), 재출력(3), 설정(4)
+        
+        # 출고 탭 (인덱스 0)
+        if index == 0:
+            QTimer.singleShot(100, lambda: self.manual_barcode_edit.setFocus())
+        # 전체피킹 탭 (인덱스 1)
+        elif index == 1:
             self._update_fp_session_info()
+            if hasattr(self, 'fp_barcode_input'):
+                QTimer.singleShot(100, lambda: self.fp_barcode_input.setFocus())
+        # 미리피킹 탭 (인덱스 2)
+        elif index == 2:
+            self._update_pp_session_info()
+            QTimer.singleShot(100, lambda: self.pp_order_input.setFocus())
+        # 재출력 탭 (인덱스 3)
+        elif index == 3:
+            QTimer.singleShot(100, lambda: self.reprint_input.setFocus())
         
         # Processor 시그널
         self.processor.scan_processed.connect(self._on_scan_processed)
@@ -3823,7 +5255,7 @@ class MainWindow(QMainWindow):
     
     @Slot()
     def _on_load_excel(self):
-        """엑셀 파일 로드"""
+        """엑셀 파일 로드 (업체 선택은 설정 탭에서)"""
         file_path = self.excel_path_edit.text().strip()
         if not file_path:
             QMessageBox.warning(self, "경고", "엑셀 파일 경로를 입력하세요.")
@@ -3840,28 +5272,9 @@ class MainWindow(QMainWindow):
                 supplier_summary = self.excel_loader.get_supplier_summary()
                 
                 if len(supplier_summary) > 1:
-                    # 여러 업체가 있으면 선택 다이얼로그 표시
+                    # 여러 업체가 있으면 설정 탭에서 차수 생성하도록 안내
                     self._add_log(f"[업체] {len(supplier_summary)}개 업체 발견: {', '.join([s['supplier'] for s in supplier_summary])}")
-                    
-                    dialog = SupplierSelectDialog(supplier_summary, self)
-                    if dialog.exec() == QDialog.Accepted:
-                        selected_suppliers = dialog.get_selected_suppliers()
-                        
-                        if len(selected_suppliers) == len(supplier_summary):
-                            # 전체 선택
-                            self._add_log(f"<b style='color:#2196F3'>[업체] 전체 {len(selected_suppliers)}개 업체 선택 - {self.excel_loader.get_total_order_count()}건 (동일 BIN 공유)</b>", html=True)
-                        elif len(selected_suppliers) > 1:
-                            # 다중 업체 선택 - 필터링 적용
-                            self.excel_loader.filter_by_supplier(selected_suppliers)
-                            self._add_log(f"<b style='color:#2196F3'>[업체] {len(selected_suppliers)}개 업체 선택: {', '.join(selected_suppliers)} - {self.excel_loader.get_filtered_order_count()}건 (동일 BIN 공유)</b>", html=True)
-                        elif len(selected_suppliers) == 1:
-                            # 단일 업체 선택
-                            self.excel_loader.filter_by_supplier(selected_suppliers[0])
-                            self._add_log(f"<b style='color:#2196F3'>[업체] '{selected_suppliers[0]}' 선택됨 - {self.excel_loader.get_filtered_order_count()}건</b>", html=True)
-                    else:
-                        # 취소 시 로드 중단
-                        self._add_log("[업체] 업체 선택 취소됨 - 로드 중단")
-                        return
+                    self._add_log(f"<b style='color:#3F51B5'>→ 설정 탭 > 차수 관리에서 업체를 선택하여 차수를 생성하세요.</b>", html=True)
                 elif len(supplier_summary) == 1:
                     # 업체가 하나뿐이면 자동 선택
                     supplier = supplier_summary[0]["supplier"]
@@ -3869,15 +5282,39 @@ class MainWindow(QMainWindow):
                 else:
                     self._add_log("[업체] 공급처 데이터 없음")
             
-            # 현재 선택된 업체 표시
-            current_supplier = self.excel_loader.get_current_supplier()
-            if current_supplier:
-                self.status_file.setText(f"파일: {Path(file_path).name} | 업체: {current_supplier}")
-            else:
-                self.status_file.setText(f"파일: {Path(file_path).name}")
+            # 파일 상태 표시
+            self.status_file.setText(f"파일: {Path(file_path).name}")
             
-            # 이후 로직 실행 (BIN 배정, PDF 스캔 등)
-            self._process_after_supplier_selection(file_path)
+            # PDF 파일 처리만 수행 (BIN 배정과 세션 생성은 설정 탭에서)
+            self._process_pdf_after_excel_load(file_path)
+    
+    def _process_pdf_after_excel_load(self, file_path: str):
+        """엑셀 로드 후 PDF 처리만 수행"""
+        # PDF 폴더 설정
+        pdf_path = self.pdf_path_edit.text().strip()
+        if pdf_path:
+            self.pdf_printer.set_labels_directory(pdf_path)
+        
+        # PDF 파일이 설정되어 있으면 자동으로 스캔
+        pdf_file_path = self.pdf_path_edit.text().strip()
+        if pdf_file_path and os.path.exists(pdf_file_path):
+            self.pdf_printer.set_pdf_file(pdf_file_path)
+            self._add_log("PDF 스캔 중...")
+            
+            # 엑셀에서 송장번호 목록 가져오기 (순서 보장)
+            excel_tracking_numbers = None
+            if self.excel_loader.df is not None and 'tracking_no' in self.excel_loader.df.columns:
+                excel_tracking_numbers = self.excel_loader.df['tracking_no'].drop_duplicates().tolist()
+            
+            count = self.pdf_printer.build_tracking_index(excel_tracking_numbers)
+            
+            if count > 0:
+                self._add_log(f"<b style='color:#4CAF50'>✓ PDF 스캔 완료: {count}개 송장번호 발견</b>", html=True)
+            else:
+                self._add_log("[경고] PDF 스캔 실패: 송장번호를 찾지 못했습니다.")
+        
+        # 구성 요약 출력
+        self._show_load_summary()
     
     def _process_after_supplier_selection(self, file_path: str):
         """업체 선택 후 실행되는 로직 (BIN 배정, PDF 스캔 등)"""
@@ -4854,6 +6291,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'priority_single_radio'):
             self.priority_single_radio.blockSignals(True)
             self.priority_combo_radio.blockSignals(True)
+            self.priority_no_type_radio.blockSignals(True)
             self.priority_small_qty_radio.blockSignals(True)
             self.priority_large_qty_radio.blockSignals(True)
             self.priority_no_qty_radio.blockSignals(True)
@@ -4863,6 +6301,9 @@ class MainWindow(QMainWindow):
             
             self.priority_single_radio.setChecked(rules["single_first"])
             self.priority_combo_radio.setChecked(rules["combo_first"])
+            # 유형 무관: 둘 다 False일 때
+            if not rules["single_first"] and not rules["combo_first"]:
+                self.priority_no_type_radio.setChecked(True)
             self.priority_small_qty_radio.setChecked(rules["small_qty_first"])
             self.priority_large_qty_radio.setChecked(rules["large_qty_first"])
             # 수량 무관: 둘 다 False일 때
@@ -4876,6 +6317,7 @@ class MainWindow(QMainWindow):
             
             self.priority_single_radio.blockSignals(False)
             self.priority_combo_radio.blockSignals(False)
+            self.priority_no_type_radio.blockSignals(False)
             self.priority_small_qty_radio.blockSignals(False)
             self.priority_large_qty_radio.blockSignals(False)
             self.priority_no_qty_radio.blockSignals(False)
@@ -5145,6 +6587,25 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_barcode_scanned(self, barcode: str):
         """바코드 스캔 이벤트"""
+        import time as time_module
+        
+        # UI 레벨 중복 방지 (1초 내 동일 바코드 무시)
+        if not hasattr(self, '_ui_last_barcode'):
+            self._ui_last_barcode = ""
+            self._ui_last_scan_time = 0
+        
+        current_time = time_module.time()
+        if barcode == self._ui_last_barcode and (current_time - self._ui_last_scan_time) < 1.0:
+            return  # 중복 무시 (로그 없이)
+        
+        self._ui_last_barcode = barcode
+        self._ui_last_scan_time = current_time
+        
+        # ★ 차수 선택 여부 확인 (필수!)
+        if not hasattr(self, '_shipment_session_id') or self._shipment_session_id <= 0:
+            self._add_log("⚠️ [경고] 먼저 차수를 선택해주세요! (설정 탭 > 차수 관리)")
+            return
+        
         if self.excel_loader.df is None:
             self._add_log("[경고] 엑셀 파일을 먼저 로드하세요")
             return
@@ -5172,7 +6633,70 @@ class MainWindow(QMainWindow):
                 self._add_log(f"🚫 [제외] 바코드 {barcode}의 송장({excluded_tracking})이 제외 목록에 있습니다")
                 return
         
+        # ★ 스캔 전 송장 정보 미리 표시 (즉시 UI 반영)
+        if not candidates.empty:
+            first_candidate = candidates.iloc[0]
+            tracking_no = str(first_candidate['tracking_no'])
+            # 현재 작업 송장이 없으면 즉시 표시
+            if not self.processor.current_tracking_no:
+                self._preview_tracking_info(tracking_no, barcode)
+        
         self.processor.process_scan(barcode)
+    
+    def _preview_tracking_info(self, tracking_no: str, barcode: str):
+        """스캔 전 송장 정보 미리보기 (즉시 UI 반영)"""
+        try:
+            # 현재 작업 송장 UI에 즉시 표시
+            if hasattr(self, 'current_tracking_label'):
+                self.current_tracking_label.setText(f"📦 {tracking_no}")
+            
+            # 송장 그룹 정보 가져오기
+            group = self.excel_loader.get_tracking_group(tracking_no)
+            if not group.empty:
+                total_qty = int(group['qty'].sum())
+                scanned_qty = int(group['scanned_qty'].sum())
+                remaining = total_qty - scanned_qty
+                
+                # 남은 수량 표시
+                if hasattr(self, 'remaining_label'):
+                    self.remaining_label.setText(str(remaining))
+                
+                # BIN 주소 표시
+                bin_ids = []
+                for _, item in group.iterrows():
+                    item_barcode = str(item['barcode']).strip()
+                    bin_id = self.bin_manager.get_sku_bin(item_barcode)
+                    bin_ids.append(bin_id)
+                self._update_bin_display(bin_ids)
+                
+                # 상세 테이블 미리 채우기
+                self.detail_table.setRowCount(len(group))
+                for row, (_, item) in enumerate(group.iterrows()):
+                    item_remaining = max(0, int(item['qty']) - int(item['scanned_qty']))
+                    item_barcode = str(item['barcode']).strip()
+                    bin_id = self.bin_manager.get_sku_bin(item_barcode)
+                    is_shared = self.bin_manager.is_shared_bin(bin_id)
+                    bin_display = f"{bin_id}★" if is_shared else bin_id
+                    
+                    self.detail_table.setItem(row, 0, QTableWidgetItem(str(item['product_name'])))
+                    self.detail_table.setItem(row, 1, QTableWidgetItem(str(item['option_name'])))
+                    self.detail_table.setItem(row, 2, QTableWidgetItem(str(item['barcode'])))
+                    self.detail_table.setItem(row, 3, QTableWidgetItem(str(int(item['qty']))))
+                    self.detail_table.setItem(row, 4, QTableWidgetItem(str(int(item['scanned_qty']))))
+                    self.detail_table.setItem(row, 5, QTableWidgetItem(str(item_remaining)))
+                    
+                    # BIN 컬럼
+                    bin_item = QTableWidgetItem(bin_display)
+                    bin_item.setTextAlignment(Qt.AlignCenter)
+                    bg_color, _ = self._get_bin_color(bin_id)
+                    bin_item.setBackground(QColor(bg_color))
+                    bin_item.setForeground(QColor("#FFFFFF"))
+                    self.detail_table.setItem(row, 6, bin_item)
+            
+            # UI 즉시 갱신
+            QApplication.processEvents()
+        except Exception as e:
+            pass  # 미리보기 실패 시 무시
     
     @Slot(object)
     def _on_scan_processed(self, event: ScanEvent):
@@ -5194,6 +6718,9 @@ class MainWindow(QMainWindow):
         """송장 완료"""
         self._add_log(f"<b style='color:#4CAF50'>✓ 송장 {tracking_no} 완료!</b>", html=True)
         self._update_status_count()
+        
+        # 출력된 송장으로 표시
+        self._mark_as_printed(tracking_no)
     
     @Slot(str)
     def _on_priority_cleared(self, tracking_no: str):
@@ -5210,6 +6737,10 @@ class MainWindow(QMainWindow):
         self._update_status_count()
         # 우선 송장 목록 업데이트
         self._update_priority_tracking_list()
+        # 설정 탭 업체 콤보박스 업데이트
+        if hasattr(self, 'settings_supplier_combo'):
+            self._update_settings_supplier_combo()
+            self._update_settings_session_list()
     
     @Slot()
     def _on_data_updated(self):

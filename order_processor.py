@@ -280,12 +280,36 @@ class OrderProcessor(QObject):
             # 송장 완료! 스캔 완료 후 PDF 출력
             self.log_message.emit(f"[완료] 송장 {tracking_no} 구성 완료!")
             
-            # PDF 출력 (스캔 완료 후)
-            self.log_message.emit(f"[출력] 송장 {tracking_no} PDF 출력 시작")
-            if self.pdf.print_pdf(tracking_no):
-                self.log_message.emit(f"[성공] PDF 출력 완료: {tracking_no}")
+            # ★ 중복 출력 방지: 이미 used=1이면 출력 건너뛰기
+            if self.excel.is_tracking_used(tracking_no):
+                self.log_message.emit(f"⚠️ [중복 방지] 송장 {tracking_no}은(는) 이미 출력 완료됨 → 출력 건너뛰기")
             else:
-                self.log_message.emit(f"[오류] PDF 출력 실패: {tracking_no}")
+                # ★ 출력 중 플래그로 중복 출력 방지
+                if not hasattr(self, '_printing_tracking'):
+                    self._printing_tracking = set()
+                
+                if tracking_no in self._printing_tracking:
+                    self.log_message.emit(f"⚠️ [중복 방지] 송장 {tracking_no} 출력 진행 중 → 건너뛰기")
+                else:
+                    self._printing_tracking.add(tracking_no)
+                    
+                    # PDF 출력 전 상태 체크
+                    pdf_index_count = len(self.pdf._tracking_index) if hasattr(self.pdf, '_tracking_index') else 0
+                    if pdf_index_count == 0:
+                        self.log_message.emit(f"⚠️ [경고] PDF 인덱스가 비어있습니다! PDF 파일을 먼저 로드하세요.")
+                        self.log_message.emit(f"   → '데이터 업로드'에서 송장 라벨 PDF 파일을 선택하세요.")
+                    
+                    # PDF 출력 (스캔 완료 후)
+                    self.log_message.emit(f"[출력] 송장 {tracking_no} PDF 출력 시작 (인덱스: {pdf_index_count}개)")
+                    if self.pdf.print_pdf(tracking_no):
+                        self.log_message.emit(f"[성공] PDF 출력 완료: {tracking_no}")
+                    else:
+                        self.log_message.emit(f"[오류] PDF 출력 실패: {tracking_no}")
+                        self.log_message.emit(f"   → PDF 파일이 설정되어 있는지 확인하세요.")
+                        self.log_message.emit(f"   → 라벨 프린터가 설정되어 있는지 확인하세요.")
+                    
+                    # 출력 완료 후 플래그 제거
+                    self._printing_tracking.discard(tracking_no)
             
             # 완료 신호음 🎵
             play_complete_sound()

@@ -49,39 +49,199 @@ def get_settings_path() -> Path:
     return base_path / "settings.json"
 
 
-def ensure_settings_file() -> bool:
+def get_default_settings() -> dict:
     """
-    settings.json 파일이 없으면 기본값으로 생성
+    기본 설정값 반환
     
     Returns:
-        새로 생성되었으면 True, 이미 존재하면 False
+        기본 설정 딕셔너리
     """
-    settings_path = get_settings_path()
-    
-    if settings_path.exists():
-        return False
-    
-    # 기본 설정값
-    default_settings = {
+    return {
+        # 프린터 설정
         "label_printer": None,
         "a4_printer": None,
+        "label_rotation": 270,
+        
+        # BIN 설정
         "bin_settings": {
             "max_qty_per_bin": 50,
             "min_qty_threshold": 10,
             "max_sku_per_shared_bin": 2,
             "dedicated_qty_threshold": 30
         },
-        "label_rotation": 270
+        
+        # ESP32 WebSocket 설정
+        "esp32_settings": {
+            "host": "0.0.0.0",
+            "port": 8765,
+            "enabled": True
+        },
+        
+        # EzAuto 설정
+        "ezauto_settings": {
+            "window_title": "이지오토",
+            "enabled": True,
+            "use_clipboard": False,
+            "delay_after_tracking": 0.8,
+            "delay_after_barcode": 0.3
+        },
+        
+        # 앱 설정
+        "app_settings": {
+            "first_run": True,
+            "version": "1.0.0",
+            "last_excel_path": None,
+            "last_pdf_path": None
+        }
     }
+
+
+def ensure_settings_file() -> bool:
+    """
+    settings.json 파일이 없으면 기본값으로 생성
+    기존 설정 파일이 있으면 누락된 키 추가
+    
+    Returns:
+        새로 생성되었으면 True, 이미 존재하면 False
+    """
+    settings_path = get_settings_path()
+    default_settings = get_default_settings()
+    
+    if not settings_path.exists():
+        # 새로 생성
+        try:
+            with open(settings_path, 'w', encoding='utf-8') as f:
+                json.dump(default_settings, f, ensure_ascii=False, indent=2)
+            print(f"[printer_manager] 기본 설정 파일 생성됨: {settings_path}")
+            return True
+        except Exception as e:
+            print(f"[printer_manager] 설정 파일 생성 실패: {e}")
+            return False
+    
+    # 기존 설정 파일이 있으면 누락된 키 추가
+    try:
+        with open(settings_path, 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+        
+        # 누락된 키 추가
+        updated = False
+        for key, value in default_settings.items():
+            if key not in settings:
+                settings[key] = value
+                updated = True
+            elif isinstance(value, dict):
+                # 중첩된 딕셔너리의 경우
+                if not isinstance(settings[key], dict):
+                    settings[key] = value
+                    updated = True
+                else:
+                    for sub_key, sub_value in value.items():
+                        if sub_key not in settings[key]:
+                            settings[key][sub_key] = sub_value
+                            updated = True
+        
+        if updated:
+            with open(settings_path, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+            print(f"[printer_manager] 설정 파일 업데이트됨 (누락된 키 추가)")
+        
+        return False  # 기존 파일이 있었음
+        
+    except Exception as e:
+        print(f"[printer_manager] 설정 파일 업데이트 실패: {e}")
+        return False
+
+
+def is_first_run() -> bool:
+    """
+    첫 실행인지 확인
+    
+    Returns:
+        첫 실행이면 True
+    """
+    settings_path = get_settings_path()
+    
+    if not settings_path.exists():
+        return True
+    
+    try:
+        with open(settings_path, 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+        
+        app_settings = settings.get("app_settings", {})
+        return app_settings.get("first_run", True)
+    except Exception:
+        return True
+
+
+def set_first_run_complete() -> bool:
+    """
+    첫 실행 완료 표시
+    
+    Returns:
+        저장 성공 여부
+    """
+    return save_app_setting("first_run", False)
+
+
+def save_app_setting(key: str, value) -> bool:
+    """
+    app_settings에 설정 저장
+    
+    Args:
+        key: 설정 키
+        value: 설정 값
+    
+    Returns:
+        저장 성공 여부
+    """
+    settings_path = get_settings_path()
+    
+    settings = {}
+    if settings_path.exists():
+        try:
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+        except Exception:
+            settings = {}
+    
+    if "app_settings" not in settings:
+        settings["app_settings"] = {}
+    
+    settings["app_settings"][key] = value
     
     try:
         with open(settings_path, 'w', encoding='utf-8') as f:
-            json.dump(default_settings, f, ensure_ascii=False, indent=2)
-        print(f"[printer_manager] 기본 설정 파일 생성됨: {settings_path}")
+            json.dump(settings, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
-        print(f"[printer_manager] 설정 파일 생성 실패: {e}")
+        print(f"앱 설정 저장 오류: {str(e)}")
         return False
+
+
+def load_app_setting(key: str, default=None):
+    """
+    app_settings에서 설정 로드
+    
+    Args:
+        key: 설정 키
+        default: 기본값
+    
+    Returns:
+        설정 값
+    """
+    settings_path = get_settings_path()
+    
+    if not settings_path.exists():
+        return default
+    
+    try:
+        with open(settings_path, 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+        
+        return settings.get("app_settings", {}).get(key, default)
+    except Exception:
+        return default
 
 
 def get_printers() -> List[str]:
@@ -587,4 +747,290 @@ def load_label_rotation() -> int:
     except Exception as e:
         print(f"회전 설정 로드 오류: {str(e)}")
         return default_rotation
+
+
+# ============================================================
+# ESP32 설정 저장/로드
+# ============================================================
+
+def save_esp32_settings(host: str = None, port: int = None, enabled: bool = None) -> bool:
+    """
+    settings.json에 ESP32 WebSocket 설정 저장
+    
+    Args:
+        host: WebSocket 서버 호스트
+        port: WebSocket 서버 포트
+        enabled: ESP32 기능 활성화 여부
+    
+    Returns:
+        저장 성공 여부
+    """
+    settings_path = get_settings_path()
+    
+    settings = {}
+    if settings_path.exists():
+        try:
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+        except Exception:
+            settings = {}
+    
+    if "esp32_settings" not in settings:
+        settings["esp32_settings"] = {}
+    
+    if host is not None:
+        settings["esp32_settings"]["host"] = host
+    if port is not None:
+        settings["esp32_settings"]["port"] = port
+    if enabled is not None:
+        settings["esp32_settings"]["enabled"] = enabled
+    
+    try:
+        with open(settings_path, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"ESP32 설정 저장 오류: {str(e)}")
+        return False
+
+
+def load_esp32_settings() -> Dict:
+    """
+    settings.json에서 ESP32 설정 로드
+    
+    Returns:
+        {
+            "host": str (기본값: "0.0.0.0"),
+            "port": int (기본값: 8765),
+            "enabled": bool (기본값: True)
+        }
+    """
+    settings_path = get_settings_path()
+    
+    default_settings = {
+        "host": "0.0.0.0",
+        "port": 8765,
+        "enabled": True
+    }
+    
+    if not settings_path.exists():
+        return default_settings
+    
+    try:
+        with open(settings_path, 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+        
+        esp32_settings = settings.get("esp32_settings", {})
+        
+        return {
+            "host": esp32_settings.get("host", "0.0.0.0"),
+            "port": esp32_settings.get("port", 8765),
+            "enabled": esp32_settings.get("enabled", True)
+        }
+    except Exception as e:
+        print(f"ESP32 설정 로드 오류: {str(e)}")
+        return default_settings
+
+
+# ============================================================
+# EzAuto 설정 저장/로드
+# ============================================================
+
+def save_ezauto_settings(window_title: str = None, enabled: bool = None, 
+                         use_clipboard: bool = None, delay_after_tracking: float = None,
+                         delay_after_barcode: float = None) -> bool:
+    """
+    settings.json에 EzAuto 설정 저장
+    
+    Args:
+        window_title: EzAuto 창 제목
+        enabled: EzAuto 입력 활성화 여부
+        use_clipboard: 클립보드 방식 사용 여부
+        delay_after_tracking: 송장번호 입력 후 대기 시간
+        delay_after_barcode: 바코드 입력 후 대기 시간
+    
+    Returns:
+        저장 성공 여부
+    """
+    settings_path = get_settings_path()
+    
+    settings = {}
+    if settings_path.exists():
+        try:
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+        except Exception:
+            settings = {}
+    
+    if "ezauto_settings" not in settings:
+        settings["ezauto_settings"] = {}
+    
+    if window_title is not None:
+        settings["ezauto_settings"]["window_title"] = window_title
+    if enabled is not None:
+        settings["ezauto_settings"]["enabled"] = enabled
+    if use_clipboard is not None:
+        settings["ezauto_settings"]["use_clipboard"] = use_clipboard
+    if delay_after_tracking is not None:
+        settings["ezauto_settings"]["delay_after_tracking"] = delay_after_tracking
+    if delay_after_barcode is not None:
+        settings["ezauto_settings"]["delay_after_barcode"] = delay_after_barcode
+    
+    try:
+        with open(settings_path, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"EzAuto 설정 저장 오류: {str(e)}")
+        return False
+
+
+def load_ezauto_settings() -> Dict:
+    """
+    settings.json에서 EzAuto 설정 로드
+    
+    Returns:
+        {
+            "window_title": str (기본값: "이지오토"),
+            "enabled": bool (기본값: True),
+            "use_clipboard": bool (기본값: False),
+            "delay_after_tracking": float (기본값: 0.8),
+            "delay_after_barcode": float (기본값: 0.3)
+        }
+    """
+    settings_path = get_settings_path()
+    
+    default_settings = {
+        "window_title": "이지오토",
+        "enabled": True,
+        "use_clipboard": False,
+        "delay_after_tracking": 0.8,
+        "delay_after_barcode": 0.3
+    }
+    
+    if not settings_path.exists():
+        return default_settings
+    
+    try:
+        with open(settings_path, 'r', encoding='utf-8') as f:
+            settings = json.load(f)
+        
+        ezauto_settings = settings.get("ezauto_settings", {})
+        
+        return {
+            "window_title": ezauto_settings.get("window_title", "이지오토"),
+            "enabled": ezauto_settings.get("enabled", True),
+            "use_clipboard": ezauto_settings.get("use_clipboard", False),
+            "delay_after_tracking": ezauto_settings.get("delay_after_tracking", 0.8),
+            "delay_after_barcode": ezauto_settings.get("delay_after_barcode", 0.3)
+        }
+    except Exception as e:
+        print(f"EzAuto 설정 로드 오류: {str(e)}")
+        return default_settings
+
+
+# ============================================================
+# 시스템 진단 기능
+# ============================================================
+
+def get_system_diagnosis() -> Dict:
+    """
+    시스템 상태 진단 (다른 PC에서 실행 시 문제 파악용)
+    
+    Returns:
+        진단 결과 딕셔너리
+    """
+    from utils import is_admin, find_korean_font
+    
+    diagnosis = {
+        "admin_rights": is_admin(),
+        "printers": {
+            "available": get_printers(),
+            "has_any": len(get_printers()) > 0,
+            "validation": validate_printer_settings()
+        },
+        "dependencies": {
+            "win32api": HAS_WIN32API,
+            "win32ui": HAS_WIN32UI,
+            "pil": HAS_PIL,
+            "fitz": HAS_FITZ
+        },
+        "fonts": {
+            "korean_font": find_korean_font(),
+            "has_korean_font": find_korean_font() is not None
+        },
+        "settings": {
+            "file_exists": get_settings_path().exists(),
+            "first_run": is_first_run()
+        }
+    }
+    
+    return diagnosis
+
+
+def get_diagnosis_report() -> str:
+    """
+    시스템 진단 보고서 생성 (사용자 표시용)
+    
+    Returns:
+        진단 보고서 문자열
+    """
+    diagnosis = get_system_diagnosis()
+    
+    report = []
+    report.append("=" * 50)
+    report.append("시스템 진단 보고서")
+    report.append("=" * 50)
+    
+    # 관리자 권한
+    if diagnosis["admin_rights"]:
+        report.append("✓ 관리자 권한: 정상")
+    else:
+        report.append("⚠️ 관리자 권한: 없음 (바코드 스캐너 기능 제한)")
+    
+    # 프린터
+    printers = diagnosis["printers"]
+    if printers["has_any"]:
+        report.append(f"✓ 프린터: {len(printers['available'])}개 발견")
+        validation = printers["validation"]
+        if validation["label_printer"]["name"]:
+            if validation["label_printer"]["exists"]:
+                report.append(f"  - 라벨 프린터: {validation['label_printer']['name']} ✓")
+            else:
+                report.append(f"  - 라벨 프린터: {validation['label_printer']['name']} ✗ (없음)")
+        else:
+            report.append("  - 라벨 프린터: 미설정")
+    else:
+        report.append("✗ 프린터: 발견되지 않음")
+    
+    # 의존성
+    deps = diagnosis["dependencies"]
+    missing_deps = []
+    if not deps["win32api"]:
+        missing_deps.append("pywin32")
+    if not deps["pil"]:
+        missing_deps.append("Pillow")
+    if not deps["fitz"]:
+        missing_deps.append("PyMuPDF")
+    
+    if missing_deps:
+        report.append(f"⚠️ 누락된 패키지: {', '.join(missing_deps)}")
+    else:
+        report.append("✓ 모든 패키지 설치됨")
+    
+    # 한글 폰트
+    if diagnosis["fonts"]["has_korean_font"]:
+        report.append(f"✓ 한글 폰트: {diagnosis['fonts']['korean_font']}")
+    else:
+        report.append("⚠️ 한글 폰트: 없음 (PDF에서 한글 깨짐 가능)")
+    
+    # 설정 파일
+    if diagnosis["settings"]["first_run"]:
+        report.append("ℹ️ 첫 실행: 설정이 필요합니다")
+    else:
+        report.append("✓ 설정 파일: 존재")
+    
+    report.append("=" * 50)
+    
+    return "\n".join(report)
 

@@ -6,6 +6,13 @@
  * - LCD에 BIN ID, 수량 표시
  * - NeoPixel LED로 색상 표시
  * - 버튼 누르면 완료 신호 전송
+ * - 버튼 5초 길게 누르면 WiFi 설정 모드 진입
+ * 
+ * WiFi 설정 모드:
+ * - ESP32가 "AutoMach_Setup" 핫스팟 생성
+ * - 스마트폰/PC로 접속 후 192.168.4.1 열기
+ * - WiFi SSID, 비밀번호, PC IP 주소 설정
+ * - 설정 저장 후 자동 재부팅
  * 
  * 하드웨어:
  * - ESP32 DevKit
@@ -21,17 +28,13 @@
  */
 
 #include <WiFi.h>
+#include <WebServer.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
-
-// ===== WiFi 설정 (수정 필요!) =====
-const char* WIFI_SSID = "YOUR_WIFI_SSID";      // WiFi 이름
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASS";  // WiFi 비밀번호
-const char* WS_HOST = "192.168.1.13";          // PC IP 주소
-const int WS_PORT = 8765;                       // WebSocket 포트
+#include <Preferences.h>
 
 // ===== 핀 설정 =====
 #define BUTTON_PIN      4      // 완료 버튼 (풀업)
@@ -40,10 +43,23 @@ const int WS_PORT = 8765;                       // WebSocket 포트
 #define I2C_SDA         21     // I2C SDA
 #define I2C_SCL         22     // I2C SCL
 
+// ===== 설정 모드 =====
+#define SETUP_BUTTON_HOLD_TIME  5000   // 5초 길게 누르면 설정 모드
+#define AP_SSID                 "AutoMach_Setup"
+#define AP_PASSWORD             ""      // 빈 문자열 = 오픈 네트워크
+
 // ===== 객체 생성 =====
 WebSocketsClient webSocket;
+WebServer server(80);
 Adafruit_NeoPixel pixels(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
-LiquidCrystal_I2C lcd(0x27, 16, 2);  // I2C 주소 0x27, 16x2 LCD
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+Preferences preferences;
+
+// ===== WiFi 설정 (NVS에서 로드) =====
+String wifiSSID = "";
+String wifiPassword = "";
+String wsHost = "";
+int wsPort = 8765;
 
 // ===== 상태 변수 =====
 String deviceId = "";
@@ -53,7 +69,12 @@ int currentQty = 0;
 bool isConnected = false;
 bool buttonPressed = false;
 unsigned long lastButtonTime = 0;
+unsigned long buttonPressStart = 0;
+bool buttonHeldForSetup = false;
 const unsigned long DEBOUNCE_TIME = 300;
+
+// 설정 모드 여부
+bool setupMode = false;
 
 // 깜빡임 관련
 bool blinkEnabled = false;
@@ -83,7 +104,7 @@ uint32_t getColor(String colorName) {
     } else if (colorName == "cyan" || colorName == "청록") {
         return pixels.Color(0, 255, 255);
     }
-    return pixels.Color(255, 255, 255);  // 기본 흰색
+    return pixels.Color(255, 255, 255);
 }
 
 // ===== 디바이스 ID 생성 (MAC 기반) =====
@@ -95,22 +116,267 @@ String getDeviceId() {
     return String(macStr);
 }
 
+// ===== NVS에서 설정 로드 =====
+void loadSettings() {
+    preferences.begin("automach", true);  // 읽기 전용
+    wifiSSID = preferences.getString("wifi_ssid", "");
+    wifiPassword = preferences.getString("wifi_pass", "");
+    wsHost = preferences.getString("ws_host", "");
+    wsPort = preferences.getInt("ws_port", 8765);
+    preferences.end();
+    
+    Serial.println("=== 저장된 설정 ===");
+    Serial.println("WiFi SSID: " + wifiSSID);
+    Serial.println("WS Host: " + wsHost);
+    Serial.println("WS Port: " + String(wsPort));
+}
+
+// ===== NVS에 설정 저장 =====
+void saveSettings() {
+    preferences.begin("automach", false);  // 쓰기 모드
+    preferences.putString("wifi_ssid", wifiSSID);
+    preferences.putString("wifi_pass", wifiPassword);
+    preferences.putString("ws_host", wsHost);
+    preferences.putInt("ws_port", wsPort);
+    preferences.end();
+    
+    Serial.println("설정 저장됨!");
+}
+
+// ===== 설정 웹페이지 HTML =====
+String getSetupPage() {
+    String html = R"(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoMach ESP32 설정</title>
+    <style>
+        * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+        body { margin: 0; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
+        .container { max-width: 400px; margin: 0 auto; }
+        .card { background: white; border-radius: 16px; padding: 30px; box-shadow: 0 10px 40px rgba(0,0,0,0.2); }
+        h1 { margin: 0 0 10px 0; color: #333; font-size: 24px; text-align: center; }
+        .subtitle { color: #666; text-align: center; margin-bottom: 25px; font-size: 14px; }
+        .device-id { background: #f0f0f0; padding: 8px 12px; border-radius: 8px; text-align: center; margin-bottom: 20px; font-family: monospace; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; font-weight: 600; color: #333; font-size: 14px; }
+        input { width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 16px; transition: border-color 0.2s; }
+        input:focus { outline: none; border-color: #667eea; }
+        .hint { font-size: 12px; color: #888; margin-top: 5px; }
+        button { width: 100%; padding: 16px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; }
+        button:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(102,126,234,0.4); }
+        button:active { transform: translateY(0); }
+        .status { margin-top: 20px; padding: 15px; border-radius: 10px; text-align: center; display: none; }
+        .status.success { display: block; background: #d4edda; color: #155724; }
+        .status.error { display: block; background: #f8d7da; color: #721c24; }
+        .divider { border-top: 1px solid #eee; margin: 25px 0; }
+        .section-title { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>🔧 AutoMach 설정</h1>
+            <p class="subtitle">ESP32 피킹 디바이스 WiFi 설정</p>
+            <div class="device-id">)";
+    html += deviceId;
+    html += R"(</div>
+            
+            <form action="/save" method="POST">
+                <div class="section-title">WiFi 연결</div>
+                
+                <div class="form-group">
+                    <label>WiFi 이름 (SSID)</label>
+                    <input type="text" name="ssid" value=")";
+    html += wifiSSID;
+    html += R"(" required placeholder="WiFi 네트워크 이름">
+                </div>
+                
+                <div class="form-group">
+                    <label>WiFi 비밀번호</label>
+                    <input type="password" name="password" value=")";
+    html += wifiPassword;
+    html += R"(" placeholder="비밀번호 입력">
+                    <div class="hint">오픈 네트워크는 비워두세요</div>
+                </div>
+                
+                <div class="divider"></div>
+                <div class="section-title">서버 연결</div>
+                
+                <div class="form-group">
+                    <label>PC IP 주소</label>
+                    <input type="text" name="host" value=")";
+    html += wsHost;
+    html += R"(" required placeholder="예: 192.168.0.100">
+                    <div class="hint">PC에서 ipconfig 명령으로 확인</div>
+                </div>
+                
+                <div class="form-group">
+                    <label>포트 번호</label>
+                    <input type="number" name="port" value=")";
+    html += String(wsPort);
+    html += R"(" required placeholder="8765">
+                    <div class="hint">기본값: 8765</div>
+                </div>
+                
+                <button type="submit">💾 설정 저장 및 재부팅</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
+)";
+    return html;
+}
+
+// ===== 저장 완료 페이지 =====
+String getSavedPage() {
+    return R"(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>설정 완료</title>
+    <style>
+        * { font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+        body { margin: 0; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .card { background: white; border-radius: 16px; padding: 40px; text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,0.2); max-width: 350px; }
+        .icon { font-size: 60px; margin-bottom: 20px; }
+        h1 { margin: 0 0 15px 0; color: #155724; font-size: 22px; }
+        p { color: #666; margin: 0; line-height: 1.6; }
+        .countdown { font-size: 48px; color: #667eea; font-weight: bold; margin: 20px 0; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">✅</div>
+        <h1>설정이 저장되었습니다!</h1>
+        <p>ESP32가 재부팅됩니다.<br>새로운 WiFi에 연결을 시도합니다.</p>
+        <div class="countdown" id="countdown">3</div>
+        <p style="font-size: 12px; color: #888;">이 핫스팟이 곧 사라집니다</p>
+    </div>
+    <script>
+        let count = 3;
+        setInterval(() => {
+            count--;
+            if (count >= 0) document.getElementById('countdown').textContent = count;
+        }, 1000);
+    </script>
+</body>
+</html>
+)";
+}
+
+// ===== 웹서버 핸들러: 메인 페이지 =====
+void handleRoot() {
+    server.send(200, "text/html", getSetupPage());
+}
+
+// ===== 웹서버 핸들러: 설정 저장 =====
+void handleSave() {
+    if (server.hasArg("ssid")) wifiSSID = server.arg("ssid");
+    if (server.hasArg("password")) wifiPassword = server.arg("password");
+    if (server.hasArg("host")) wsHost = server.arg("host");
+    if (server.hasArg("port")) wsPort = server.arg("port").toInt();
+    
+    saveSettings();
+    
+    server.send(200, "text/html", getSavedPage());
+    
+    // LCD에 표시
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Settings Saved!");
+    lcd.setCursor(0, 1);
+    lcd.print("Rebooting...");
+    
+    // 성공 표시 (초록색)
+    for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+        pixels.setPixelColor(i, pixels.Color(0, 255, 0));
+    }
+    pixels.show();
+    
+    // 3초 후 재부팅
+    delay(3000);
+    ESP.restart();
+}
+
+// ===== 설정 모드 시작 =====
+void startSetupMode() {
+    setupMode = true;
+    
+    Serial.println("\n========================================");
+    Serial.println("  WiFi 설정 모드 진입!");
+    Serial.println("========================================");
+    
+    // AP 모드로 전환
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(AP_SSID, AP_PASSWORD);
+    
+    IPAddress IP = WiFi.softAPIP();
+    Serial.print("AP IP 주소: ");
+    Serial.println(IP);
+    
+    // 웹서버 설정
+    server.on("/", handleRoot);
+    server.on("/save", HTTP_POST, handleSave);
+    server.begin();
+    
+    Serial.println("웹서버 시작됨!");
+    Serial.println("1. '" + String(AP_SSID) + "' WiFi에 연결하세요");
+    Serial.println("2. 브라우저에서 http://192.168.4.1 접속");
+    Serial.println("========================================\n");
+    
+    // LCD 표시
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Setup Mode");
+    lcd.setCursor(0, 1);
+    lcd.print("192.168.4.1");
+    
+    // LED 표시 (파란색 순환)
+    for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+        pixels.setPixelColor(i, pixels.Color(0, 100, 255));
+    }
+    pixels.show();
+}
+
 // ===== WiFi 연결 =====
 void connectWiFi() {
-    Serial.println("WiFi 연결 중...");
+    if (wifiSSID.length() == 0) {
+        Serial.println("WiFi 설정 없음! 설정 모드로 진입합니다.");
+        startSetupMode();
+        return;
+    }
+    
+    Serial.println("WiFi 연결 중: " + wifiSSID);
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("WiFi...");
+    lcd.setCursor(0, 1);
+    lcd.print(wifiSSID.substring(0, 16));
     
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
     
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 30) {
         delay(500);
         Serial.print(".");
+        
+        // 연결 중 LED 애니메이션
+        pixels.setPixelColor(attempts % NEOPIXEL_COUNT, pixels.Color(0, 0, 255));
+        pixels.show();
+        
         attempts++;
     }
+    
+    // LED 클리어
+    pixels.clear();
+    pixels.show();
     
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("\nWiFi 연결됨!");
@@ -122,18 +388,32 @@ void connectWiFi() {
         lcd.print("WiFi OK");
         lcd.setCursor(0, 1);
         lcd.print(WiFi.localIP());
+        
+        // 성공 표시 (초록색)
+        for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+            pixels.setPixelColor(i, pixels.Color(0, 255, 0));
+        }
+        pixels.show();
         delay(1000);
     } else {
         Serial.println("\nWiFi 연결 실패!");
+        Serial.println("설정 모드로 진입합니다...");
+        
         lcd.clear();
         lcd.setCursor(0, 0);
         lcd.print("WiFi FAIL");
+        lcd.setCursor(0, 1);
+        lcd.print("Setup mode...");
         
         // 실패 표시 (빨간색)
         for (int i = 0; i < NEOPIXEL_COUNT; i++) {
             pixels.setPixelColor(i, pixels.Color(255, 0, 0));
         }
         pixels.show();
+        delay(2000);
+        
+        // 설정 모드로 전환
+        startSetupMode();
     }
 }
 
@@ -147,7 +427,6 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
             lcd.setCursor(0, 0);
             lcd.print("Disconnected");
             
-            // 연결 해제 표시 (주황색)
             for (int i = 0; i < NEOPIXEL_COUNT; i++) {
                 pixels.setPixelColor(i, pixels.Color(255, 165, 0));
             }
@@ -158,7 +437,6 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
             Serial.println("[WS] 연결됨!");
             isConnected = true;
             
-            // hello 메시지 전송
             sendHello();
             
             lcd.clear();
@@ -167,14 +445,12 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
             lcd.setCursor(0, 1);
             lcd.print(deviceId);
             
-            // 연결 성공 표시 (초록색)
             for (int i = 0; i < NEOPIXEL_COUNT; i++) {
                 pixels.setPixelColor(i, pixels.Color(0, 255, 0));
             }
             pixels.show();
             delay(500);
             
-            // 대기 상태
             showStandby();
             break;
             
@@ -218,7 +494,6 @@ void sendDone() {
     webSocket.sendTXT(json);
     Serial.println("[WS] Done 전송: " + json);
     
-    // 완료 표시 (잠깐 초록색 깜빡임)
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < NEOPIXEL_COUNT; j++) {
             pixels.setPixelColor(j, pixels.Color(0, 255, 0));
@@ -232,7 +507,6 @@ void sendDone() {
         delay(100);
     }
     
-    // 대기 상태로 복귀
     showStandby();
 }
 
@@ -249,7 +523,6 @@ void handleMessage(const char* payload) {
     String msgType = doc["type"].as<String>();
     
     if (msgType == "bind") {
-        // 바인딩 명령
         bindedBinId = doc["bin_id"].as<String>();
         Serial.println("바인딩됨: " + bindedBinId);
         
@@ -260,7 +533,6 @@ void handleMessage(const char* payload) {
         lcd.print(bindedBinId);
         
     } else if (msgType == "display") {
-        // 디스플레이 명령
         currentMode = doc["mode"].as<String>();
         String binId = doc["bin"].as<String>();
         String color = doc["color"].as<String>();
@@ -270,7 +542,6 @@ void handleMessage(const char* payload) {
         Serial.printf("Display: bin=%s, color=%s, qty=%d, blink=%d\n",
                       binId.c_str(), color.c_str(), currentQty, blinkEnabled);
         
-        // LCD 표시
         lcd.clear();
         lcd.setCursor(0, 0);
         lcd.print(binId);
@@ -278,7 +549,6 @@ void handleMessage(const char* payload) {
         lcd.print("Qty: ");
         lcd.print(currentQty);
         
-        // LED 색상 설정
         currentColor = getColor(color);
         for (int i = 0; i < NEOPIXEL_COUNT; i++) {
             pixels.setPixelColor(i, currentColor);
@@ -289,7 +559,6 @@ void handleMessage(const char* payload) {
         lastBlinkTime = millis();
         
     } else if (msgType == "off") {
-        // LED/LCD 끄기
         Serial.println("Display OFF");
         
         blinkEnabled = false;
@@ -316,9 +585,8 @@ void showStandby() {
         lcd.print("(unbound)");
     }
     
-    // LED 끄기 또는 희미하게
     for (int i = 0; i < NEOPIXEL_COUNT; i++) {
-        pixels.setPixelColor(i, pixels.Color(10, 10, 10));  // 희미한 흰색
+        pixels.setPixelColor(i, pixels.Color(10, 10, 10));
     }
     pixels.show();
 }
@@ -343,29 +611,87 @@ void handleBlink() {
     }
 }
 
-// ===== 버튼 처리 =====
+// ===== 버튼 처리 (설정 모드 진입 포함) =====
 void handleButton() {
-    bool currentState = digitalRead(BUTTON_PIN) == LOW;  // 풀업이므로 LOW가 눌림
+    bool currentState = digitalRead(BUTTON_PIN) == LOW;
     unsigned long now = millis();
     
-    if (currentState && !buttonPressed && (now - lastButtonTime > DEBOUNCE_TIME)) {
-        buttonPressed = true;
-        lastButtonTime = now;
-        
-        Serial.println("버튼 눌림!");
-        
-        if (isConnected) {
-            sendDone();
+    if (currentState) {
+        // 버튼이 눌려있는 상태
+        if (buttonPressStart == 0) {
+            buttonPressStart = now;
         }
-    } else if (!currentState) {
-        buttonPressed = false;
+        
+        // 5초 이상 눌렀는지 확인
+        if (!buttonHeldForSetup && (now - buttonPressStart >= SETUP_BUTTON_HOLD_TIME)) {
+            buttonHeldForSetup = true;
+            
+            Serial.println("\n버튼 5초 유지 - 설정 모드 진입!");
+            
+            // LED로 피드백 (보라색 깜빡임)
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < NEOPIXEL_COUNT; j++) {
+                    pixels.setPixelColor(j, pixels.Color(128, 0, 128));
+                }
+                pixels.show();
+                delay(200);
+                pixels.clear();
+                pixels.show();
+                delay(200);
+            }
+            
+            // 설정 모드 시작
+            startSetupMode();
+        }
+        
+    } else {
+        // 버튼이 떼어진 상태
+        if (buttonPressStart > 0 && !buttonHeldForSetup) {
+            // 짧게 눌렀다 뗀 경우 (일반 버튼 동작)
+            if (now - buttonPressStart > 50 && now - buttonPressStart < SETUP_BUTTON_HOLD_TIME) {
+                if (now - lastButtonTime > DEBOUNCE_TIME) {
+                    lastButtonTime = now;
+                    
+                    Serial.println("버튼 눌림!");
+                    
+                    if (isConnected && !setupMode) {
+                        sendDone();
+                    }
+                }
+            }
+        }
+        
+        buttonPressStart = 0;
+        buttonHeldForSetup = false;
+    }
+}
+
+// ===== 설정 모드 LED 애니메이션 =====
+void handleSetupModeAnimation() {
+    static unsigned long lastAnimTime = 0;
+    static int animIndex = 0;
+    
+    unsigned long now = millis();
+    if (now - lastAnimTime >= 200) {
+        lastAnimTime = now;
+        
+        // 순환하는 파란색 LED
+        pixels.clear();
+        pixels.setPixelColor(animIndex, pixels.Color(0, 100, 255));
+        pixels.setPixelColor((animIndex + 1) % NEOPIXEL_COUNT, pixels.Color(0, 50, 128));
+        pixels.show();
+        
+        animIndex = (animIndex + 1) % NEOPIXEL_COUNT;
     }
 }
 
 // ===== 설정 =====
 void setup() {
     Serial.begin(115200);
-    Serial.println("\n\n=== ESP32 피킹 디바이스 시작 ===");
+    Serial.println("\n\n========================================");
+    Serial.println("  ESP32 피킹 디바이스 시작");
+    Serial.println("  버튼 5초 누르기 = WiFi 설정 모드");
+    Serial.println("========================================");
     
     // 버튼 핀 설정
     pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -382,7 +708,7 @@ void setup() {
     
     // NeoPixel 초기화
     pixels.begin();
-    pixels.setBrightness(50);  // 밝기 50/255
+    pixels.setBrightness(50);
     pixels.clear();
     pixels.show();
     
@@ -397,36 +723,74 @@ void setup() {
     deviceId = getDeviceId();
     Serial.println("Device ID: " + deviceId);
     
+    // 저장된 설정 로드
+    loadSettings();
+    
+    // 부팅 시 버튼이 눌려있으면 설정 모드
+    if (digitalRead(BUTTON_PIN) == LOW) {
+        Serial.println("버튼 누른 채 부팅 - 설정 모드!");
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Release button");
+        lcd.setCursor(0, 1);
+        lcd.print("for setup mode");
+        
+        // 버튼 떼기 대기
+        while (digitalRead(BUTTON_PIN) == LOW) {
+            delay(100);
+        }
+        delay(500);
+        
+        startSetupMode();
+        return;
+    }
+    
     // WiFi 연결
     connectWiFi();
     
-    // WebSocket 설정
-    if (WiFi.status() == WL_CONNECTED) {
-        webSocket.begin(WS_HOST, WS_PORT, "/");
+    // 설정 모드가 아니면 WebSocket 연결
+    if (!setupMode && WiFi.status() == WL_CONNECTED) {
+        Serial.println("WebSocket 연결 중: " + wsHost + ":" + String(wsPort));
+        
+        webSocket.begin(wsHost.c_str(), wsPort, "/");
         webSocket.onEvent(webSocketEvent);
-        webSocket.setReconnectInterval(5000);  // 5초마다 재연결 시도
+        webSocket.setReconnectInterval(5000);
         
         lcd.clear();
         lcd.setCursor(0, 0);
         lcd.print("Connecting WS...");
+        lcd.setCursor(0, 1);
+        lcd.print(wsHost);
     }
 }
 
 // ===== 메인 루프 =====
 void loop() {
+    // 버튼 처리 (설정 모드 진입 감지)
+    handleButton();
+    
+    if (setupMode) {
+        // 설정 모드: 웹서버 처리
+        server.handleClient();
+        handleSetupModeAnimation();
+        return;
+    }
+    
+    // 일반 모드
+    
     // WiFi 재연결
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("WiFi 재연결 시도...");
         connectWiFi();
+        
+        if (setupMode) return;  // 설정 모드로 전환된 경우
+        
         delay(1000);
         return;
     }
     
     // WebSocket 처리
     webSocket.loop();
-    
-    // 버튼 처리
-    handleButton();
     
     // 깜빡임 처리
     handleBlink();
