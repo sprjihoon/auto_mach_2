@@ -687,6 +687,10 @@ class MainWindow(QMainWindow):
         self.prepick_tab = self._create_prepick_tab()
         self.tab_widget.addTab(self.prepick_tab, "📦 미리피킹")
         
+        # 설정 탭 (신규)
+        self.settings_tab = self._create_settings_tab()
+        self.tab_widget.addTab(self.settings_tab, "⚙️ 설정")
+        
         main_layout.addWidget(self.tab_widget, 1)
         
         # === 하단: 상태바 ===
@@ -1353,6 +1357,410 @@ class MainWindow(QMainWindow):
         self._connect_prepick_signals()
         
         return tab
+    
+    def _create_settings_tab(self) -> QWidget:
+        """설정 탭 생성 - 데이터 업로드, 프린터 설정, BIN 설정, 저장 위치 등"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # 스크롤 영역 (설정이 많아질 경우 대비)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; }")
+        
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setSpacing(20)
+        
+        # ===== 1. 데이터 업로드 섹션 =====
+        upload_group = QGroupBox("📁 데이터 업로드")
+        upload_layout = QVBoxLayout(upload_group)
+        upload_layout.setSpacing(15)
+        
+        # 엑셀 파일 업로드
+        excel_row = QHBoxLayout()
+        excel_row.addWidget(QLabel("📊 엑셀 파일:"))
+        self.settings_excel_path = QLineEdit()
+        self.settings_excel_path.setPlaceholderText("주문 엑셀 파일 선택 (.xlsx)")
+        self.settings_excel_path.setReadOnly(True)
+        excel_row.addWidget(self.settings_excel_path, 1)
+        self.settings_excel_browse_btn = QPushButton("찾아보기")
+        self.settings_excel_browse_btn.clicked.connect(self._on_settings_browse_excel)
+        excel_row.addWidget(self.settings_excel_browse_btn)
+        self.settings_excel_load_btn = QPushButton("불러오기")
+        self.settings_excel_load_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self.settings_excel_load_btn.clicked.connect(self._on_settings_load_excel)
+        excel_row.addWidget(self.settings_excel_load_btn)
+        upload_layout.addLayout(excel_row)
+        
+        # 송장(라벨) PDF 업로드
+        label_pdf_row = QHBoxLayout()
+        label_pdf_row.addWidget(QLabel("🏷️ 송장 PDF:"))
+        self.settings_label_pdf_path = QLineEdit()
+        self.settings_label_pdf_path.setPlaceholderText("송장(라벨) PDF 파일 선택")
+        self.settings_label_pdf_path.setReadOnly(True)
+        label_pdf_row.addWidget(self.settings_label_pdf_path, 1)
+        self.settings_label_pdf_btn = QPushButton("파일 선택")
+        self.settings_label_pdf_btn.clicked.connect(self._on_settings_browse_label_pdf)
+        label_pdf_row.addWidget(self.settings_label_pdf_btn)
+        upload_layout.addLayout(label_pdf_row)
+        
+        # 주문서(A4) PDF 업로드
+        order_pdf_row = QHBoxLayout()
+        order_pdf_row.addWidget(QLabel("📄 주문서 PDF:"))
+        self.settings_order_pdf_path = QLineEdit()
+        self.settings_order_pdf_path.setPlaceholderText("주문서(A4) PDF 파일 선택")
+        self.settings_order_pdf_path.setReadOnly(True)
+        order_pdf_row.addWidget(self.settings_order_pdf_path, 1)
+        self.settings_order_pdf_btn = QPushButton("파일 선택")
+        self.settings_order_pdf_btn.clicked.connect(self._on_settings_browse_order_pdf)
+        order_pdf_row.addWidget(self.settings_order_pdf_btn)
+        upload_layout.addLayout(order_pdf_row)
+        
+        scroll_layout.addWidget(upload_group)
+        
+        # ===== 2. 프린터 설정 섹션 =====
+        printer_group = QGroupBox("🖨️ 프린터 설정")
+        printer_layout = QVBoxLayout(printer_group)
+        printer_layout.setSpacing(15)
+        
+        # 라벨 프린터
+        label_printer_row = QHBoxLayout()
+        label_printer_row.addWidget(QLabel("라벨 프린터:"))
+        self.settings_label_printer = QComboBox()
+        self.settings_label_printer.setMinimumWidth(250)
+        label_printer_row.addWidget(self.settings_label_printer, 1)
+        self.settings_label_test_btn = QPushButton("테스트 출력")
+        self.settings_label_test_btn.clicked.connect(self._on_settings_test_label_printer)
+        label_printer_row.addWidget(self.settings_label_test_btn)
+        printer_layout.addLayout(label_printer_row)
+        
+        # A4 프린터
+        a4_printer_row = QHBoxLayout()
+        a4_printer_row.addWidget(QLabel("A4 프린터:"))
+        self.settings_a4_printer = QComboBox()
+        self.settings_a4_printer.setMinimumWidth(250)
+        a4_printer_row.addWidget(self.settings_a4_printer, 1)
+        self.settings_a4_test_btn = QPushButton("테스트 출력")
+        self.settings_a4_test_btn.clicked.connect(self._on_settings_test_a4_printer)
+        a4_printer_row.addWidget(self.settings_a4_test_btn)
+        printer_layout.addLayout(a4_printer_row)
+        
+        # 회전 설정
+        rotation_row = QHBoxLayout()
+        rotation_row.addWidget(QLabel("송장 회전:"))
+        self.settings_rotation = QComboBox()
+        self.settings_rotation.addItems(["0°", "90°", "180°", "270°"])
+        self.settings_rotation.setMaximumWidth(100)
+        self.settings_rotation.currentIndexChanged.connect(self._on_settings_rotation_changed)
+        rotation_row.addWidget(self.settings_rotation)
+        rotation_row.addStretch()
+        printer_layout.addLayout(rotation_row)
+        
+        # 프린터 목록 새로고침
+        refresh_row = QHBoxLayout()
+        refresh_row.addStretch()
+        self.settings_refresh_printers_btn = QPushButton("🔄 프린터 목록 새로고침")
+        self.settings_refresh_printers_btn.clicked.connect(self._on_settings_refresh_printers)
+        refresh_row.addWidget(self.settings_refresh_printers_btn)
+        printer_layout.addLayout(refresh_row)
+        
+        scroll_layout.addWidget(printer_group)
+        
+        # ===== 3. BIN 설정 섹션 =====
+        bin_group = QGroupBox("🗃️ BIN 설정")
+        bin_layout = QVBoxLayout(bin_group)
+        bin_layout.setSpacing(15)
+        
+        # BIN당 최대 수량
+        max_qty_row = QHBoxLayout()
+        max_qty_row.addWidget(QLabel("BIN당 최대 수량:"))
+        self.settings_bin_max_qty = QSpinBox()
+        self.settings_bin_max_qty.setRange(1, 9999)
+        self.settings_bin_max_qty.setValue(100)
+        self.settings_bin_max_qty.setSuffix(" 개")
+        max_qty_row.addWidget(self.settings_bin_max_qty)
+        max_qty_row.addWidget(QLabel("(초과 시 다음 BIN으로 분산)"))
+        max_qty_row.addStretch()
+        bin_layout.addLayout(max_qty_row)
+        
+        # 소량 SKU 기준
+        min_qty_row = QHBoxLayout()
+        min_qty_row.addWidget(QLabel("소량 SKU 기준:"))
+        self.settings_bin_min_qty = QSpinBox()
+        self.settings_bin_min_qty.setRange(0, 9999)
+        self.settings_bin_min_qty.setValue(10)
+        self.settings_bin_min_qty.setSuffix(" 개 이하")
+        min_qty_row.addWidget(self.settings_bin_min_qty)
+        min_qty_row.addWidget(QLabel("(이하면 공유 BIN 배정)"))
+        min_qty_row.addStretch()
+        bin_layout.addLayout(min_qty_row)
+        
+        # 공유 BIN 최대 SKU
+        max_sku_row = QHBoxLayout()
+        max_sku_row.addWidget(QLabel("공유 BIN 최대 SKU:"))
+        self.settings_bin_max_sku = QSpinBox()
+        self.settings_bin_max_sku.setRange(1, 99)
+        self.settings_bin_max_sku.setValue(5)
+        self.settings_bin_max_sku.setSuffix(" 종류")
+        max_sku_row.addWidget(self.settings_bin_max_sku)
+        max_sku_row.addWidget(QLabel("(공유 BIN에 묶을 최대 SKU 수)"))
+        max_sku_row.addStretch()
+        bin_layout.addLayout(max_sku_row)
+        
+        # BIN 설정 저장 버튼
+        bin_btn_row = QHBoxLayout()
+        bin_btn_row.addStretch()
+        self.settings_bin_save_btn = QPushButton("BIN 설정 저장")
+        self.settings_bin_save_btn.clicked.connect(self._on_settings_save_bin)
+        bin_btn_row.addWidget(self.settings_bin_save_btn)
+        bin_layout.addLayout(bin_btn_row)
+        
+        scroll_layout.addWidget(bin_group)
+        
+        # ===== 4. 저장 위치 / 피킹리스트 차수 섹션 =====
+        path_group = QGroupBox("📂 저장 위치 / 피킹리스트")
+        path_layout = QVBoxLayout(path_group)
+        path_layout.setSpacing(15)
+        
+        # 저장 위치
+        save_path_row = QHBoxLayout()
+        save_path_row.addWidget(QLabel("저장 위치:"))
+        self.settings_save_path = QLineEdit()
+        self.settings_save_path.setPlaceholderText("엑셀/PDF 저장 위치 선택")
+        save_path_row.addWidget(self.settings_save_path, 1)
+        self.settings_save_path_btn = QPushButton("위치 선택")
+        self.settings_save_path_btn.clicked.connect(self._on_settings_browse_save_path)
+        save_path_row.addWidget(self.settings_save_path_btn)
+        path_layout.addLayout(save_path_row)
+        
+        # 피킹리스트 관련 버튼
+        picking_row = QHBoxLayout()
+        self.settings_save_excel_btn = QPushButton("📊 엑셀 저장")
+        self.settings_save_excel_btn.clicked.connect(self._on_settings_save_excel)
+        picking_row.addWidget(self.settings_save_excel_btn)
+        
+        self.settings_save_pdf_btn = QPushButton("📄 피킹리스트 PDF 저장")
+        self.settings_save_pdf_btn.clicked.connect(self._on_settings_save_pdf)
+        picking_row.addWidget(self.settings_save_pdf_btn)
+        
+        self.settings_open_pdf_btn = QPushButton("📂 피킹리스트 열기")
+        self.settings_open_pdf_btn.clicked.connect(self._on_settings_open_pdf)
+        self.settings_open_pdf_btn.setEnabled(False)
+        picking_row.addWidget(self.settings_open_pdf_btn)
+        
+        picking_row.addStretch()
+        path_layout.addLayout(picking_row)
+        
+        scroll_layout.addWidget(path_group)
+        
+        # 여백
+        scroll_layout.addStretch()
+        
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+        
+        # 프린터 목록 로드
+        QTimer.singleShot(100, self._load_settings_tab_data)
+        
+        return tab
+    
+    def _load_settings_tab_data(self):
+        """설정 탭 초기 데이터 로드"""
+        # 프린터 목록 로드
+        printers = get_printers()
+        self.settings_label_printer.clear()
+        self.settings_a4_printer.clear()
+        for printer in printers:
+            self.settings_label_printer.addItem(printer)
+            self.settings_a4_printer.addItem(printer)
+        
+        # 저장된 프린터 설정 로드
+        settings = load_printer_settings()
+        if settings.get("label_printer"):
+            idx = self.settings_label_printer.findText(settings["label_printer"])
+            if idx >= 0:
+                self.settings_label_printer.setCurrentIndex(idx)
+        if settings.get("a4_printer"):
+            idx = self.settings_a4_printer.findText(settings["a4_printer"])
+            if idx >= 0:
+                self.settings_a4_printer.setCurrentIndex(idx)
+        
+        # 회전 설정 로드
+        rotation = settings.get("rotation", 0)
+        rotation_idx = rotation // 90
+        if 0 <= rotation_idx < 4:
+            self.settings_rotation.setCurrentIndex(rotation_idx)
+        
+        # BIN 설정 로드
+        bin_settings = load_bin_settings()
+        self.settings_bin_max_qty.setValue(bin_settings.get("max_qty_per_bin", 100))
+        self.settings_bin_min_qty.setValue(bin_settings.get("min_qty_threshold", 10))
+        self.settings_bin_max_sku.setValue(bin_settings.get("max_sku_per_shared_bin", 5))
+        
+        # 저장 경로 로드
+        save_path = settings.get("save_path", "")
+        if save_path:
+            self.settings_save_path.setText(save_path)
+    
+    # ===== 설정 탭 이벤트 핸들러 =====
+    
+    def _on_settings_browse_excel(self):
+        """설정 탭 - 엑셀 파일 찾아보기"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "엑셀 파일 선택", "", "Excel Files (*.xlsx *.xls)"
+        )
+        if file_path:
+            self.settings_excel_path.setText(file_path)
+            # 출고 탭에도 동기화
+            self.excel_path_edit.setText(file_path)
+    
+    def _on_settings_load_excel(self):
+        """설정 탭 - 엑셀 파일 불러오기"""
+        file_path = self.settings_excel_path.text()
+        if not file_path:
+            QMessageBox.warning(self, "경고", "먼저 엑셀 파일을 선택하세요.")
+            return
+        # 출고 탭의 로드 함수 호출
+        self.excel_path_edit.setText(file_path)
+        self._on_load_excel()
+    
+    def _on_settings_browse_label_pdf(self):
+        """설정 탭 - 송장 PDF 파일 선택"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "송장 PDF 파일 선택", "", "PDF Files (*.pdf)"
+        )
+        if file_path:
+            self.settings_label_pdf_path.setText(file_path)
+            # 출고 탭에도 동기화
+            self.pdf_path_edit.setText(file_path)
+    
+    def _on_settings_browse_order_pdf(self):
+        """설정 탭 - 주문서 PDF 파일 선택"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "주문서 PDF 파일 선택", "", "PDF Files (*.pdf)"
+        )
+        if file_path:
+            self.settings_order_pdf_path.setText(file_path)
+            # 출고 탭에도 동기화
+            self.pdf_path_2_edit.setText(file_path)
+            # 주문서 출력 체크박스 활성화
+            self.order_sheet_check.setChecked(True)
+    
+    def _on_settings_test_label_printer(self):
+        """설정 탭 - 라벨 프린터 테스트"""
+        self._on_test_label_printer()
+    
+    def _on_settings_test_a4_printer(self):
+        """설정 탭 - A4 프린터 테스트"""
+        self._on_test_a4_printer()
+    
+    def _on_settings_rotation_changed(self, index: int):
+        """설정 탭 - 회전 설정 변경"""
+        rotation = index * 90
+        settings = load_printer_settings()
+        settings["rotation"] = rotation
+        save_printer_settings(
+            settings.get("label_printer", ""),
+            settings.get("a4_printer", ""),
+            rotation
+        )
+        # 출고 탭 회전 콤보박스 동기화
+        if hasattr(self, 'rotation_combo'):
+            self.rotation_combo.setCurrentIndex(index)
+    
+    def _on_settings_refresh_printers(self):
+        """설정 탭 - 프린터 목록 새로고침"""
+        printers = get_printers()
+        
+        # 현재 선택 저장
+        current_label = self.settings_label_printer.currentText()
+        current_a4 = self.settings_a4_printer.currentText()
+        
+        # 콤보박스 갱신
+        self.settings_label_printer.clear()
+        self.settings_a4_printer.clear()
+        for printer in printers:
+            self.settings_label_printer.addItem(printer)
+            self.settings_a4_printer.addItem(printer)
+        
+        # 이전 선택 복원
+        idx = self.settings_label_printer.findText(current_label)
+        if idx >= 0:
+            self.settings_label_printer.setCurrentIndex(idx)
+        idx = self.settings_a4_printer.findText(current_a4)
+        if idx >= 0:
+            self.settings_a4_printer.setCurrentIndex(idx)
+        
+        # 출고 탭 프린터 콤보박스도 동기화
+        self._refresh_printer_combos()
+        
+        QMessageBox.information(self, "프린터", f"프린터 목록을 새로고침했습니다.\n총 {len(printers)}개 프린터 발견")
+    
+    def _on_settings_save_bin(self):
+        """설정 탭 - BIN 설정 저장"""
+        max_qty = self.settings_bin_max_qty.value()
+        min_qty = self.settings_bin_min_qty.value()
+        max_sku = self.settings_bin_max_sku.value()
+        
+        # BIN 매니저에 적용
+        self.bin_manager.set_settings(max_qty, min_qty, max_sku)
+        
+        # 설정 저장
+        save_bin_settings(max_qty, min_qty, max_sku)
+        
+        QMessageBox.information(self, "BIN 설정", "BIN 설정이 저장되었습니다.")
+    
+    def _on_settings_browse_save_path(self):
+        """설정 탭 - 저장 위치 선택"""
+        folder = QFileDialog.getExistingDirectory(self, "저장 위치 선택")
+        if folder:
+            self.settings_save_path.setText(folder)
+            # 출고 탭에도 동기화
+            if hasattr(self, 'save_path_edit'):
+                self.save_path_edit.setText(folder)
+    
+    def _on_settings_save_excel(self):
+        """설정 탭 - 엑셀 저장"""
+        self._on_save_excel()
+    
+    def _on_settings_save_pdf(self):
+        """설정 탭 - 피킹리스트 PDF 저장"""
+        self._on_save_product_pdf()
+        # PDF 저장 후 열기 버튼 활성화
+        if hasattr(self, '_last_pdf_path') and self._last_pdf_path:
+            self.settings_open_pdf_btn.setEnabled(True)
+    
+    def _on_settings_open_pdf(self):
+        """설정 탭 - 피킹리스트 열기"""
+        self._on_open_picking_pdf()
+    
+    def _refresh_printer_combos(self):
+        """출고 탭 프린터 콤보박스 새로고침"""
+        printers = get_printers()
+        
+        # 라벨 프린터 콤보박스
+        if hasattr(self, 'label_printer_combo'):
+            current = self.label_printer_combo.currentText()
+            self.label_printer_combo.clear()
+            for printer in printers:
+                self.label_printer_combo.addItem(printer)
+            idx = self.label_printer_combo.findText(current)
+            if idx >= 0:
+                self.label_printer_combo.setCurrentIndex(idx)
+        
+        # A4 프린터 콤보박스
+        if hasattr(self, 'a4_printer_combo'):
+            current = self.a4_printer_combo.currentText()
+            self.a4_printer_combo.clear()
+            for printer in printers:
+                self.a4_printer_combo.addItem(printer)
+            idx = self.a4_printer_combo.findText(current)
+            if idx >= 0:
+                self.a4_printer_combo.setCurrentIndex(idx)
     
     # 슬롯별 고유 색상 정의
     SLOT_COLORS = {
@@ -3127,7 +3535,7 @@ class MainWindow(QMainWindow):
         return widget
     
     def _create_log_section(self) -> QGroupBox:
-        """로그 섹션"""
+        """로그 섹션 (간소화됨 - 상세 설정은 설정 탭에서)"""
         group = QGroupBox("로그")
         layout = QVBoxLayout(group)
         
@@ -3144,87 +3552,43 @@ class MainWindow(QMainWindow):
         clear_log_btn.clicked.connect(lambda: self.log_text.clear())
         btn_layout.addWidget(clear_log_btn)
         
-        # 프린터 설정 그룹 (로그 지우기 옆에 배치)
-        btn_layout.addSpacing(10)
-        btn_layout.addWidget(QLabel("라벨 프린터:"))
-        self.label_printer_combo = QComboBox()
-        self.label_printer_combo.setMaximumWidth(150)
-        self.label_printer_combo.setToolTip("송장(라벨)을 출력할 프린터를 선택하세요")
-        btn_layout.addWidget(self.label_printer_combo)
+        btn_layout.addSpacing(20)
         
-        # 라벨 테스트 출력 버튼
-        self.label_test_btn = QPushButton("테스트")
-        self.label_test_btn.setMaximumWidth(60)
-        self.label_test_btn.setToolTip("라벨 프린터 테스트 출력")
-        self.label_test_btn.clicked.connect(self._on_test_label_printer)
-        btn_layout.addWidget(self.label_test_btn)
-        
-        btn_layout.addSpacing(10)
-        
-        # A4 프린터 선택
-        btn_layout.addWidget(QLabel("A4 프린터:"))
-        self.a4_printer_combo = QComboBox()
-        self.a4_printer_combo.setMaximumWidth(150)
-        self.a4_printer_combo.setToolTip("주문서(A4)를 출력할 프린터를 선택하세요")
-        btn_layout.addWidget(self.a4_printer_combo)
-        
-        # A4 테스트 출력 버튼
-        self.a4_test_btn = QPushButton("테스트")
-        self.a4_test_btn.setMaximumWidth(60)
-        self.a4_test_btn.setToolTip("A4 프린터 테스트 출력")
-        self.a4_test_btn.clicked.connect(self._on_test_a4_printer)
-        btn_layout.addWidget(self.a4_test_btn)
-        
-        btn_layout.addSpacing(10)
-        
-        # BIN 설정 버튼
-        self.bin_settings_btn = QPushButton("🗃️ BIN 설정")
-        self.bin_settings_btn.setToolTip("BIN 배정 설정 (최대수량, 공유 BIN 등)")
-        self.bin_settings_btn.clicked.connect(self._on_bin_settings)
-        btn_layout.addWidget(self.bin_settings_btn)
-        
-        btn_layout.addSpacing(5)
-        
-        # 송장 회전 설정 콤보박스
-        btn_layout.addWidget(QLabel("회전:"))
-        self.rotation_combo = QComboBox()
-        self.rotation_combo.addItems(["0°", "90°", "180°", "270°"])
-        self.rotation_combo.setMaximumWidth(70)
-        self.rotation_combo.setToolTip("송장 출력 방향 설정")
-        self.rotation_combo.currentIndexChanged.connect(self._on_rotation_change)
-        btn_layout.addWidget(self.rotation_combo)
-        
-        # 회전 설정 로드 및 콤보박스 선택
-        self._update_rotation_combo()
+        # 설정 탭 이동 버튼
+        settings_tab_btn = QPushButton("⚙️ 설정 탭 열기")
+        settings_tab_btn.setToolTip("프린터 설정, BIN 설정, 저장 위치 등은 설정 탭에서 관리합니다")
+        settings_tab_btn.setStyleSheet("background-color: #607D8B; color: white;")
+        settings_tab_btn.clicked.connect(self._on_go_to_settings_tab)
+        btn_layout.addWidget(settings_tab_btn)
         
         btn_layout.addStretch()
         
-        # 저장 경로 설정
-        btn_layout.addWidget(QLabel("저장 위치:"))
+        # ===== 숨김 위젯 (호환성 유지용) =====
+        # 기존 코드에서 참조하므로 위젯은 생성하되 숨김 처리
+        hidden_widget = QWidget()
+        hidden_layout = QHBoxLayout(hidden_widget)
+        hidden_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.label_printer_combo = QComboBox()
+        self.a4_printer_combo = QComboBox()
+        self.rotation_combo = QComboBox()
+        self.rotation_combo.addItems(["0°", "90°", "180°", "270°"])
+        self.rotation_combo.currentIndexChanged.connect(self._on_rotation_change)
         self.save_path_edit = QLineEdit()
-        self.save_path_edit.setPlaceholderText("저장 위치 선택")
-        self.save_path_edit.setMaximumWidth(200)
-        btn_layout.addWidget(self.save_path_edit)
-        
-        self.save_browse_btn = QPushButton("위치 선택")
-        self.save_browse_btn.clicked.connect(self._on_browse_save_path)
-        btn_layout.addWidget(self.save_browse_btn)
-        
-        # 저장 버튼
-        save_btn = QPushButton("엑셀 저장")
-        save_btn.clicked.connect(self._on_save_excel)
-        btn_layout.addWidget(save_btn)
-        
-        # 제품별 PDF 저장 버튼
-        pdf_save_btn = QPushButton("📄 피킹리스트 PDF")
-        pdf_save_btn.clicked.connect(self._on_save_product_pdf)
-        btn_layout.addWidget(pdf_save_btn)
-        
-        # 피킹리스트 열기 버튼
-        self.open_pdf_btn = QPushButton("📂 피킹리스트 열기")
+        self.open_pdf_btn = QPushButton()
         self.open_pdf_btn.clicked.connect(self._on_open_picking_pdf)
-        self.open_pdf_btn.setEnabled(False)  # 초기에는 비활성화
-        btn_layout.addWidget(self.open_pdf_btn)
+        self.open_pdf_btn.setEnabled(False)
+        
+        hidden_layout.addWidget(self.label_printer_combo)
+        hidden_layout.addWidget(self.a4_printer_combo)
+        hidden_layout.addWidget(self.rotation_combo)
+        hidden_layout.addWidget(self.save_path_edit)
+        hidden_layout.addWidget(self.open_pdf_btn)
+        hidden_widget.hide()
+        layout.addWidget(hidden_widget)
+        
+        # 회전 설정 로드 및 콤보박스 선택
+        self._update_rotation_combo()
         
         # 마지막 저장된 PDF 경로
         self._last_pdf_path = None
@@ -3232,6 +3596,14 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_layout)
         
         return group
+    
+    def _on_go_to_settings_tab(self):
+        """설정 탭으로 이동"""
+        # 설정 탭 인덱스 찾기
+        for i in range(self.tab_widget.count()):
+            if "설정" in self.tab_widget.tabText(i):
+                self.tab_widget.setCurrentIndex(i)
+                break
     
     def _create_status_bar(self):
         """상태바 생성"""
