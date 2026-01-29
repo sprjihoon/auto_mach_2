@@ -941,6 +941,10 @@ class MainWindow(QMainWindow):
         self.reprint_tab = self._create_reprint_tab()
         self.tab_widget.addTab(self.reprint_tab, "재출력")
         
+        # ESP32 설정 탭
+        self.esp32_tab = self._create_esp32_tab()
+        self.tab_widget.addTab(self.esp32_tab, "📡 ESP32")
+        
         # 설정 탭
         self.settings_tab = self._create_settings_tab()
         self.tab_widget.addTab(self.settings_tab, "⚙️ 설정")
@@ -1934,6 +1938,356 @@ class MainWindow(QMainWindow):
         self._connect_prepick_signals()
         
         return tab
+    
+    def _create_esp32_tab(self) -> QWidget:
+        """ESP32 설정 탭 생성 - WebSocket 서버, 장치 관리"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # ===== 1. 서버 설정 섹션 =====
+        server_settings_group = QGroupBox("📡 WebSocket 서버 설정")
+        server_settings_layout = QVBoxLayout(server_settings_group)
+        server_settings_layout.setSpacing(15)
+        
+        # 포트 설정
+        port_row = QHBoxLayout()
+        port_row.addWidget(QLabel("서버 포트:"))
+        self.esp32_port_input = QSpinBox()
+        self.esp32_port_input.setRange(1024, 65535)
+        self.esp32_port_input.setValue(8765)
+        self.esp32_port_input.setMinimumWidth(100)
+        port_row.addWidget(self.esp32_port_input)
+        port_row.addWidget(QLabel("(기본: 8765)"))
+        port_row.addStretch()
+        server_settings_layout.addLayout(port_row)
+        
+        # 호스트 설정
+        host_row = QHBoxLayout()
+        host_row.addWidget(QLabel("서버 호스트:"))
+        self.esp32_host_input = QLineEdit()
+        self.esp32_host_input.setText("0.0.0.0")
+        self.esp32_host_input.setMaximumWidth(150)
+        self.esp32_host_input.setToolTip("0.0.0.0 = 모든 인터페이스에서 접속 허용")
+        host_row.addWidget(self.esp32_host_input)
+        host_row.addWidget(QLabel("(0.0.0.0 = 모든 IP)"))
+        host_row.addStretch()
+        server_settings_layout.addLayout(host_row)
+        
+        # 설정 저장 버튼
+        save_row = QHBoxLayout()
+        save_row.addStretch()
+        self.esp32_save_settings_btn = QPushButton("💾 설정 저장")
+        self.esp32_save_settings_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self.esp32_save_settings_btn.clicked.connect(self._on_esp32_save_settings)
+        save_row.addWidget(self.esp32_save_settings_btn)
+        server_settings_layout.addLayout(save_row)
+        
+        layout.addWidget(server_settings_group)
+        
+        # ===== 2. 서버 상태 및 제어 섹션 =====
+        server_control_group = QGroupBox("🎛️ 서버 제어")
+        server_control_layout = QVBoxLayout(server_control_group)
+        server_control_layout.setSpacing(15)
+        
+        # 서버 상태 표시
+        status_row = QHBoxLayout()
+        status_row.addWidget(QLabel("서버 상태:"))
+        self.esp32_server_status = QLabel("⚫ 중지됨")
+        self.esp32_server_status.setFont(QFont("Arial", 14, QFont.Bold))
+        self.esp32_server_status.setMinimumWidth(200)
+        status_row.addWidget(self.esp32_server_status)
+        status_row.addStretch()
+        server_control_layout.addLayout(status_row)
+        
+        # 서버 시작/중지 버튼
+        btn_row = QHBoxLayout()
+        self.esp32_start_btn = QPushButton("▶️ 서버 시작")
+        self.esp32_start_btn.setMinimumHeight(50)
+        self.esp32_start_btn.setMinimumWidth(150)
+        self.esp32_start_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; font-size: 14px;")
+        self.esp32_start_btn.clicked.connect(self._on_esp32_toggle_server)
+        btn_row.addWidget(self.esp32_start_btn)
+        
+        self.esp32_stop_btn = QPushButton("⏹️ 서버 중지")
+        self.esp32_stop_btn.setMinimumHeight(50)
+        self.esp32_stop_btn.setMinimumWidth(150)
+        self.esp32_stop_btn.setStyleSheet("background-color: #f44336; color: white; font-weight: bold; font-size: 14px;")
+        self.esp32_stop_btn.clicked.connect(self._on_esp32_stop_server)
+        self.esp32_stop_btn.setEnabled(False)
+        btn_row.addWidget(self.esp32_stop_btn)
+        
+        btn_row.addStretch()
+        server_control_layout.addLayout(btn_row)
+        
+        # 연결 정보
+        info_row = QHBoxLayout()
+        info_row.addWidget(QLabel("연결 정보:"))
+        self.esp32_connection_info = QLabel("서버가 시작되면 연결 정보가 표시됩니다")
+        self.esp32_connection_info.setStyleSheet("color: #666; padding: 5px; background: #f5f5f5; border-radius: 3px;")
+        self.esp32_connection_info.setWordWrap(True)
+        info_row.addWidget(self.esp32_connection_info, 1)
+        server_control_layout.addLayout(info_row)
+        
+        layout.addWidget(server_control_group)
+        
+        # ===== 3. 연결된 장치 목록 섹션 =====
+        device_group = QGroupBox("🔌 연결된 ESP32 장치")
+        device_layout = QVBoxLayout(device_group)
+        device_layout.setSpacing(10)
+        
+        # 장치 수 표시
+        count_row = QHBoxLayout()
+        count_row.addWidget(QLabel("연결된 장치:"))
+        self.esp32_device_count = QLabel("0대")
+        self.esp32_device_count.setFont(QFont("Arial", 14, QFont.Bold))
+        self.esp32_device_count.setStyleSheet("color: #4CAF50;")
+        count_row.addWidget(self.esp32_device_count)
+        count_row.addStretch()
+        device_layout.addLayout(count_row)
+        
+        # 장치 테이블
+        self.esp32_device_table = QTableWidget()
+        self.esp32_device_table.setColumnCount(4)
+        self.esp32_device_table.setHorizontalHeaderLabels(["장치 ID", "BIN 바인딩", "상태", "연결 시간"])
+        self.esp32_device_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.esp32_device_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        self.esp32_device_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.esp32_device_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self.esp32_device_table.setColumnWidth(1, 100)
+        self.esp32_device_table.setColumnWidth(2, 80)
+        self.esp32_device_table.setColumnWidth(3, 120)
+        self.esp32_device_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.esp32_device_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.esp32_device_table.setMinimumHeight(200)
+        device_layout.addWidget(self.esp32_device_table)
+        
+        # 장치 관리 버튼
+        device_btn_row = QHBoxLayout()
+        self.esp32_refresh_btn = QPushButton("🔄 새로고침")
+        self.esp32_refresh_btn.clicked.connect(self._on_esp32_refresh_devices)
+        device_btn_row.addWidget(self.esp32_refresh_btn)
+        
+        self.esp32_clear_bindings_btn = QPushButton("🗑️ 바인딩 초기화")
+        self.esp32_clear_bindings_btn.clicked.connect(self._on_esp32_clear_bindings)
+        device_btn_row.addWidget(self.esp32_clear_bindings_btn)
+        
+        self.esp32_test_all_btn = QPushButton("🔔 전체 장치 테스트")
+        self.esp32_test_all_btn.setToolTip("연결된 모든 장치에 테스트 신호 전송")
+        self.esp32_test_all_btn.clicked.connect(self._on_esp32_test_all_devices)
+        device_btn_row.addWidget(self.esp32_test_all_btn)
+        
+        device_btn_row.addStretch()
+        device_layout.addLayout(device_btn_row)
+        
+        layout.addWidget(device_group)
+        
+        # ===== 4. 서버 로그 섹션 =====
+        log_group = QGroupBox("📝 ESP32 서버 로그")
+        log_layout = QVBoxLayout(log_group)
+        
+        self.esp32_log = QTextEdit()
+        self.esp32_log.setReadOnly(True)
+        self.esp32_log.setMaximumHeight(200)
+        self.esp32_log.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4; font-family: Consolas;")
+        log_layout.addWidget(self.esp32_log)
+        
+        # 로그 버튼
+        log_btn_row = QHBoxLayout()
+        self.esp32_clear_log_btn = QPushButton("🗑️ 로그 지우기")
+        self.esp32_clear_log_btn.clicked.connect(lambda: self.esp32_log.clear())
+        log_btn_row.addWidget(self.esp32_clear_log_btn)
+        log_btn_row.addStretch()
+        log_layout.addLayout(log_btn_row)
+        
+        layout.addWidget(log_group)
+        
+        # 여백
+        layout.addStretch()
+        
+        # 초기 설정 로드
+        QTimer.singleShot(100, self._load_esp32_settings)
+        
+        # ESP32 시그널 연결
+        self._connect_esp32_signals()
+        
+        return tab
+    
+    def _load_esp32_settings(self):
+        """ESP32 설정 로드"""
+        from printer_manager import load_esp32_settings
+        settings = load_esp32_settings()
+        self.esp32_port_input.setValue(settings.get("port", 8765))
+        self.esp32_host_input.setText(settings.get("host", "0.0.0.0"))
+    
+    def _on_esp32_save_settings(self):
+        """ESP32 설정 저장"""
+        from printer_manager import save_esp32_settings
+        port = self.esp32_port_input.value()
+        host = self.esp32_host_input.text().strip() or "0.0.0.0"
+        
+        if save_esp32_settings(host=host, port=port):
+            self._add_esp32_log(f"설정 저장됨 - 호스트: {host}, 포트: {port}")
+            QMessageBox.information(self, "저장 완료", f"ESP32 설정이 저장되었습니다.\n\n호스트: {host}\n포트: {port}")
+        else:
+            QMessageBox.warning(self, "저장 실패", "ESP32 설정 저장에 실패했습니다.")
+    
+    def _on_esp32_toggle_server(self):
+        """ESP32 서버 시작"""
+        if not self.esp32_transport.is_running:
+            # 설정된 포트 적용
+            port = self.esp32_port_input.value()
+            host = self.esp32_host_input.text().strip() or "0.0.0.0"
+            
+            # 서버 설정 업데이트
+            self.esp32_transport.host = host
+            self.esp32_transport.port = port
+            
+            if self.esp32_transport.start():
+                self._add_esp32_log(f"ESP32 서버 시작 시도... (호스트: {host}, 포트: {port})")
+            else:
+                self._add_esp32_log("[오류] 서버 시작 실패")
+                QMessageBox.warning(self, "오류", "ESP32 서버 시작 실패\nwebsockets 패키지가 설치되어 있는지 확인하세요.")
+    
+    def _on_esp32_stop_server(self):
+        """ESP32 서버 중지"""
+        if self.esp32_transport.is_running:
+            self.esp32_transport.stop()
+    
+    def _on_esp32_refresh_devices(self):
+        """ESP32 장치 목록 새로고침"""
+        self._update_esp32_device_table()
+    
+    def _on_esp32_clear_bindings(self):
+        """ESP32 장치 바인딩 초기화"""
+        reply = QMessageBox.question(
+            self, "확인", 
+            "모든 장치 바인딩을 초기화하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.device_registry.clear_bindings()
+            self._update_esp32_device_table()
+            self._add_esp32_log("모든 장치 바인딩이 초기화되었습니다.")
+    
+    def _on_esp32_test_all_devices(self):
+        """모든 ESP32 장치에 테스트 신호 전송"""
+        devices = self.device_registry.get_all_devices()
+        if not devices:
+            QMessageBox.information(self, "알림", "연결된 장치가 없습니다.")
+            return
+        
+        for device_id in devices:
+            # 테스트 LED 깜빡임 명령 전송
+            self.esp32_transport.send_command(device_id, {"cmd": "test"})
+        
+        self._add_esp32_log(f"테스트 신호 전송: {len(devices)}대 장치")
+    
+    def _add_esp32_log(self, message: str):
+        """ESP32 로그 추가"""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.esp32_log.append(f"[{timestamp}] {message}")
+        # 전체피킹 탭 로그에도 동기화
+        if hasattr(self, 'fp_log'):
+            self.fp_log.append(f"[{timestamp}] [ESP32] {message}")
+    
+    def _update_esp32_device_table(self):
+        """ESP32 장치 테이블 업데이트"""
+        devices = self.device_registry.get_all_devices()
+        bindings = self.device_registry.get_bindings()
+        
+        self.esp32_device_table.setRowCount(len(devices))
+        self.esp32_device_count.setText(f"{len(devices)}대")
+        
+        for row, device_id in enumerate(devices):
+            # 장치 ID
+            self.esp32_device_table.setItem(row, 0, QTableWidgetItem(device_id))
+            
+            # BIN 바인딩
+            bin_id = bindings.get(device_id, "미할당")
+            self.esp32_device_table.setItem(row, 1, QTableWidgetItem(bin_id))
+            
+            # 상태
+            status = "🟢 연결됨"
+            self.esp32_device_table.setItem(row, 2, QTableWidgetItem(status))
+            
+            # 연결 시간
+            self.esp32_device_table.setItem(row, 3, QTableWidgetItem("-"))
+        
+        # 전체피킹 탭 장치 수 동기화
+        if hasattr(self, 'fp_device_count'):
+            self.fp_device_count.setText(f"연결: {len(devices)}대")
+    
+    def _connect_esp32_signals(self):
+        """ESP32 탭 시그널 연결"""
+        # ESP32 서버 시그널
+        self.esp32_transport.device_hello.connect(self._on_esp32_device_hello)
+        self.esp32_transport.device_disconnected.connect(self._on_esp32_device_disconnected)
+        self.esp32_transport.server_started.connect(self._on_esp32_server_started)
+        self.esp32_transport.server_stopped.connect(self._on_esp32_server_stopped)
+    
+    @Slot(str)
+    def _on_esp32_device_hello(self, device_id: str):
+        """ESP32 장치 연결 (ESP32 탭용)"""
+        self._add_esp32_log(f"장치 연결: {device_id}")
+        self._update_esp32_device_table()
+    
+    @Slot(str)
+    def _on_esp32_device_disconnected(self, device_id: str):
+        """ESP32 장치 연결 해제 (ESP32 탭용)"""
+        self._add_esp32_log(f"장치 연결 해제: {device_id}")
+        self._update_esp32_device_table()
+    
+    @Slot(int)
+    def _on_esp32_server_started(self, port: int):
+        """ESP32 서버 시작됨 (ESP32 탭용)"""
+        self.esp32_server_status.setText(f"🟢 실행중 (포트: {port})")
+        self.esp32_server_status.setStyleSheet("color: green; font-weight: bold;")
+        self.esp32_start_btn.setEnabled(False)
+        self.esp32_stop_btn.setEnabled(True)
+        
+        # 연결 정보 업데이트
+        import socket
+        try:
+            hostname = socket.gethostname()
+            local_ip = socket.gethostbyname(hostname)
+        except:
+            local_ip = "알 수 없음"
+        
+        self.esp32_connection_info.setText(
+            f"ESP32 펌웨어에서 다음 주소로 연결:\n"
+            f"ws://{local_ip}:{port}"
+        )
+        self.esp32_connection_info.setStyleSheet("color: #2196F3; padding: 10px; background: #E3F2FD; border-radius: 5px; font-weight: bold;")
+        
+        self._add_esp32_log(f"서버 시작됨 - ws://{local_ip}:{port}")
+        
+        # 전체피킹 탭 동기화
+        if hasattr(self, 'fp_server_status'):
+            self.fp_server_status.setText(f"🟢 실행중 (:{port})")
+            self.fp_server_status.setStyleSheet("color: green;")
+            self.fp_server_btn.setText("서버 중지")
+    
+    @Slot()
+    def _on_esp32_server_stopped(self):
+        """ESP32 서버 중지됨 (ESP32 탭용)"""
+        self.esp32_server_status.setText("⚫ 중지됨")
+        self.esp32_server_status.setStyleSheet("color: gray;")
+        self.esp32_start_btn.setEnabled(True)
+        self.esp32_stop_btn.setEnabled(False)
+        
+        self.esp32_connection_info.setText("서버가 시작되면 연결 정보가 표시됩니다")
+        self.esp32_connection_info.setStyleSheet("color: #666; padding: 5px; background: #f5f5f5; border-radius: 3px;")
+        
+        self._add_esp32_log("서버 중지됨")
+        
+        # 전체피킹 탭 동기화
+        if hasattr(self, 'fp_server_status'):
+            self.fp_server_status.setText("⚫ 중지됨")
+            self.fp_server_status.setStyleSheet("color: gray;")
+            self.fp_server_btn.setText("서버 시작")
     
     def _create_settings_tab(self) -> QWidget:
         """설정 탭 생성 - 데이터 업로드, 프린터 설정, BIN 설정, 저장 위치 등"""
@@ -3566,11 +3920,8 @@ class MainWindow(QMainWindow):
         self.full_pick_engine.error_occurred.connect(self._on_fp_error)
         self.full_pick_engine.log_message.connect(self._add_fp_log)
         
-        # ESP32 서버 시그널
-        self.esp32_transport.device_hello.connect(self._on_fp_device_hello)
-        self.esp32_transport.device_disconnected.connect(self._on_fp_device_disconnected)
-        self.esp32_transport.server_started.connect(self._on_fp_server_started)
-        self.esp32_transport.server_stopped.connect(self._on_fp_server_stopped)
+        # ESP32 서버 시그널은 ESP32 탭에서 통합 관리 (중복 연결 방지)
+        # _connect_esp32_signals()에서 연결하고 전체피킹 탭 UI도 동기화함
     
     def _add_fp_log(self, message: str):
         """전체피킹 로그 추가"""
@@ -3665,15 +4016,11 @@ class MainWindow(QMainWindow):
     
     @Slot()
     def _on_fp_toggle_server(self):
-        """ESP32 서버 시작/중지"""
+        """ESP32 서버 시작/중지 (ESP32 탭 함수 호출)"""
         if self.esp32_transport.is_running:
-            self.esp32_transport.stop()
+            self._on_esp32_stop_server()
         else:
-            if self.esp32_transport.start():
-                self._add_fp_log("ESP32 WebSocket 서버 시작 시도...")
-            else:
-                self._add_fp_log("[오류] 서버 시작 실패")
-                QMessageBox.warning(self, "오류", "ESP32 서버 시작 실패\nwebsockets 패키지가 설치되어 있는지 확인하세요.")
+            self._on_esp32_toggle_server()
     
     @Slot(int)
     def _on_fp_server_started(self, port: int):
@@ -3726,11 +4073,18 @@ class MainWindow(QMainWindow):
             self.fp_device_list.addItem(item)
         
         self.fp_device_count.setText(f"연결: {self.device_registry.connected_count}대")
+        
+        # ESP32 탭 테이블도 동기화
+        if hasattr(self, 'esp32_device_table'):
+            self._update_esp32_device_table()
     
     @Slot()
     def _on_fp_refresh_devices(self):
         """장치 목록 새로고침"""
         self._update_fp_device_list()
+        # ESP32 탭도 동기화
+        if hasattr(self, 'esp32_device_table'):
+            self._update_esp32_device_table()
     
     @Slot()
     def _on_fp_clear_bindings(self):
@@ -3738,6 +4092,9 @@ class MainWindow(QMainWindow):
         self.device_registry.clear_all_bindings()
         self._update_fp_device_list()
         self._add_fp_log("모든 장치 바인딩 초기화됨")
+        # ESP32 탭도 동기화
+        if hasattr(self, 'esp32_device_table'):
+            self._update_esp32_device_table()
     
     @Slot()
     def _on_fp_sku_scan(self):
