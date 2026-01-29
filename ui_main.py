@@ -28,8 +28,11 @@ from full_pick_engine import FullPickEngine
 from pre_pick_engine import PrePickEngine, SlotState
 from work_session import WorkSessionManager, WorkSession
 
+# 대화상자 임포트
+from ui_dialogs import SummaryDialog, SetupWizardDialog, SupplierSelectDialog, BinSettingsDialog
 
-class SummaryDialog(QDialog):
+
+class _SummaryDialog_REMOVED(QDialog):
     """구성 요약 다이얼로그 (카드 형태)"""
     
     def __init__(self, df: pd.DataFrame, parent=None):
@@ -201,8 +204,8 @@ from reprint_pdf_extractor import extract_pages_from_pdf, extract_reprint_page_t
 from bin_manager import BinManager
 
 
-class SetupWizardDialog(QDialog):
-    """첫 실행 설정 마법사 다이얼로그"""
+class _SetupWizardDialog_REMOVED(QDialog):
+    """첫 실행 설정 마법사 다이얼로그 - ui_dialogs.py로 이동됨"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -406,8 +409,8 @@ class SetupWizardDialog(QDialog):
         self.accept()
 
 
-class SupplierSelectDialog(QDialog):
-    """업체(공급처) 선택 다이얼로그 - 다중 선택 지원"""
+class _SupplierSelectDialog_REMOVED(QDialog):
+    """업체(공급처) 선택 다이얼로그 - ui_dialogs.py로 이동됨"""
     
     def __init__(self, supplier_summary: list, parent=None, current_suppliers: list = None):
         """
@@ -595,8 +598,8 @@ class SupplierSelectDialog(QDialog):
         return self.selected_suppliers[0] if len(self.selected_suppliers) == 1 else None
 
 
-class BinSettingsDialog(QDialog):
-    """BIN 설정 다이얼로그"""
+class _BinSettingsDialog_REMOVED(QDialog):
+    """BIN 설정 다이얼로그 - ui_dialogs.py로 이동됨"""
     
     def __init__(self, bin_manager, parent=None):
         super().__init__(parent)
@@ -2280,13 +2283,18 @@ class MainWindow(QMainWindow):
         rotation_row.addStretch()
         printer_layout.addLayout(rotation_row)
         
-        # 프린터 목록 새로고침
-        refresh_row = QHBoxLayout()
-        refresh_row.addStretch()
-        self.settings_refresh_printers_btn = QPushButton("🔄 프린터 목록 새로고침")
+        # 프린터 저장 버튼
+        printer_btn_row = QHBoxLayout()
+        printer_btn_row.addStretch()
+        self.settings_refresh_printers_btn = QPushButton("🔄 새로고침")
         self.settings_refresh_printers_btn.clicked.connect(self._on_settings_refresh_printers)
-        refresh_row.addWidget(self.settings_refresh_printers_btn)
-        printer_layout.addLayout(refresh_row)
+        printer_btn_row.addWidget(self.settings_refresh_printers_btn)
+        
+        self.settings_save_printers_btn = QPushButton("💾 프린터 설정 저장")
+        self.settings_save_printers_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self.settings_save_printers_btn.clicked.connect(self._on_settings_save_printers)
+        printer_btn_row.addWidget(self.settings_save_printers_btn)
+        printer_layout.addLayout(printer_btn_row)
         
         scroll_layout.addWidget(printer_group)
         
@@ -2374,11 +2382,14 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.settings_a4_printer.setCurrentIndex(idx)
         
-        # 회전 설정 로드
-        rotation = settings.get("rotation", 0)
+        # 회전 설정 로드 (load_label_rotation 사용)
+        from printer_manager import load_label_rotation
+        rotation = load_label_rotation()
         rotation_idx = rotation // 90
         if 0 <= rotation_idx < 4:
+            self.settings_rotation.blockSignals(True)
             self.settings_rotation.setCurrentIndex(rotation_idx)
+            self.settings_rotation.blockSignals(False)
         
         # BIN 설정 로드
         bin_settings = load_bin_settings()
@@ -2441,25 +2452,52 @@ class MainWindow(QMainWindow):
     
     def _on_settings_test_label_printer(self):
         """설정 탭 - 라벨 프린터 테스트"""
-        self._on_test_label_printer()
+        # 설정 탭의 콤보박스에서 프린터 이름 가져오기
+        printer_name = self.settings_label_printer.currentText()
+        if not printer_name or printer_name == "프린터 없음" or printer_name == "(선택 안함)":
+            QMessageBox.warning(self, "경고", "라벨 프린터를 먼저 선택해주세요.")
+            return
+        self._on_test_label_printer(printer_name)
     
     def _on_settings_test_a4_printer(self):
         """설정 탭 - A4 프린터 테스트"""
-        self._on_test_a4_printer()
+        # 설정 탭의 콤보박스에서 프린터 이름 가져오기
+        printer_name = self.settings_a4_printer.currentText()
+        if not printer_name or printer_name == "프린터 없음" or printer_name == "(선택 안함)":
+            QMessageBox.warning(self, "경고", "A4 프린터를 먼저 선택해주세요.")
+            return
+        self._on_test_a4_printer(printer_name)
     
     def _on_settings_rotation_changed(self, index: int):
         """설정 탭 - 회전 설정 변경"""
+        from printer_manager import save_label_rotation
         rotation = index * 90
-        settings = load_printer_settings()
-        settings["rotation"] = rotation
-        save_printer_settings(
-            settings.get("label_printer", ""),
-            settings.get("a4_printer", ""),
-            rotation
-        )
+        if save_label_rotation(rotation):
+            self._add_log(f"송장 회전 설정 변경: {rotation}°")
         # 출고 탭 회전 콤보박스 동기화
         if hasattr(self, 'rotation_combo'):
+            self.rotation_combo.blockSignals(True)
             self.rotation_combo.setCurrentIndex(index)
+            self.rotation_combo.blockSignals(False)
+    
+    def _on_settings_save_printers(self):
+        """설정 탭 - 프린터 설정 저장"""
+        label_printer = self.settings_label_printer.currentText()
+        a4_printer = self.settings_a4_printer.currentText()
+        
+        if not label_printer or label_printer == "프린터 없음":
+            label_printer = None
+        if not a4_printer or a4_printer == "프린터 없음":
+            a4_printer = None
+        
+        if save_printer_settings(label_printer, a4_printer):
+            self._add_log(f"프린터 설정 저장됨 - 라벨: {label_printer or '없음'}, A4: {a4_printer or '없음'}")
+            QMessageBox.information(self, "저장 완료", f"프린터 설정이 저장되었습니다.\n\n라벨 프린터: {label_printer or '(선택 안함)'}\nA4 프린터: {a4_printer or '(선택 안함)'}")
+            
+            # 출고 탭 프린터 콤보박스도 동기화
+            self._load_printer_settings_to_ui()
+        else:
+            QMessageBox.warning(self, "저장 실패", "프린터 설정 저장에 실패했습니다.")
     
     def _on_settings_refresh_printers(self):
         """설정 탭 - 프린터 목록 새로고침"""
@@ -6043,9 +6081,11 @@ class MainWindow(QMainWindow):
             self._add_log(f"A4 프린터 설정: {printer_name}")
     
     @Slot()
-    def _on_test_label_printer(self):
+    def _on_test_label_printer(self, printer_name: str = None):
         """라벨 프린터 테스트 출력 (회전 설정 포함)"""
-        printer_name = self.label_printer_combo.currentText()
+        # 프린터 이름이 전달되지 않으면 출고 탭 콤보박스에서 가져오기
+        if not printer_name:
+            printer_name = self.label_printer_combo.currentText()
         if not printer_name or printer_name == "프린터 없음":
             QMessageBox.warning(self, "경고", "라벨 프린터를 먼저 선택해주세요.")
             return
@@ -6187,9 +6227,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "오류", f"라벨 프린터 테스트 출력 실패: {printer_name}")
     
     @Slot()
-    def _on_test_a4_printer(self):
+    def _on_test_a4_printer(self, printer_name: str = None):
         """A4 프린터 테스트 출력"""
-        printer_name = self.a4_printer_combo.currentText()
+        # 프린터 이름이 전달되지 않으면 출고 탭 콤보박스에서 가져오기
+        if not printer_name:
+            printer_name = self.a4_printer_combo.currentText()
         if not printer_name or printer_name == "프린터 없음":
             QMessageBox.warning(self, "경고", "A4 프린터를 먼저 선택해주세요.")
             return
