@@ -851,6 +851,8 @@ class MainWindow(QMainWindow):
         
         # 미리피킹 엔진
         self.pre_pick_engine = PrePickEngine()
+        # 미리피킹에도 ESP32 연동 설정
+        self.pre_pick_engine.set_esp32(self.device_registry, self.esp32_transport)
         
         # 작업 세션 관리자
         self.session_manager = WorkSessionManager()
@@ -5568,7 +5570,10 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_tab_changed(self, index: int):
         """탭 전환 이벤트 - 각 탭의 스캔 입력에 포커스"""
-        # 탭 순서: 출고(0), 전체피킹(1), 미리피킹(2), 재출력(3), 설정(4)
+        # 탭 순서: 출고(0), 전체피킹(1), 미리피킹(2), 재출력(3), ESP32(4), 설정(5)
+        
+        # ESP32 모드 전환 처리
+        self._handle_esp32_mode_switch(index)
         
         # 출고 탭 (인덱스 0)
         if index == 0:
@@ -5593,6 +5598,58 @@ class MainWindow(QMainWindow):
         self.processor.log_message.connect(self._add_log)
         self.processor.scanner_pause.connect(self.scanner.pause)
         self.processor.scanner_resume.connect(self.scanner.resume)
+    
+    def _handle_esp32_mode_switch(self, tab_index: int):
+        """탭 전환 시 ESP32 모드 전환 처리"""
+        if not self.esp32_transport.is_running:
+            return
+        
+        # 전체피킹 탭(1)으로 전환
+        if tab_index == 1:
+            # 미리피킹 LCD 모두 OFF
+            self._turn_off_prepick_lcds()
+            # 전체피킹에 활성 세션이 있으면 LCD 다시 표시
+            if self.full_pick_engine.current_session:
+                self.full_pick_engine._send_display_to_all_bins()
+                self._add_esp32_log("[모드전환] 전체피킹 LCD 활성화")
+        
+        # 미리피킹 탭(2)으로 전환
+        elif tab_index == 2:
+            # 전체피킹 LCD 모두 OFF
+            self._turn_off_fullpick_lcds()
+            # 미리피킹 활성 슬롯 LCD 다시 표시
+            self.pre_pick_engine._update_all_lcd_displays()
+            self._add_esp32_log("[모드전환] 미리피킹 LCD 활성화")
+        
+        # 다른 탭으로 전환 시 모든 LCD OFF
+        elif tab_index not in [1, 2, 4]:  # 전체피킹, 미리피킹, ESP32 탭 제외
+            self._turn_off_all_lcds()
+    
+    def _turn_off_fullpick_lcds(self):
+        """전체피킹 모든 LCD OFF"""
+        if not self.full_pick_engine.current_session:
+            return
+        
+        for bin_id, task in self.full_pick_engine.current_session.bins.items():
+            if not task.done:
+                device_id = self.device_registry.get_device_id_by_bin(bin_id)
+                if device_id:
+                    self.esp32_transport.send_off(device_id, bin_id)
+    
+    def _turn_off_prepick_lcds(self):
+        """미리피킹 모든 LCD OFF"""
+        for slot_id in range(1, self.pre_pick_engine.slot_manager.active_slot_count + 1):
+            slot = self.pre_pick_engine.slot_manager.get_slot(slot_id)
+            if slot and slot.state != SlotState.EMPTY:
+                for task in slot.tasks:
+                    device_id = self.device_registry.get_device_id_by_bin(task.bin_id)
+                    if device_id:
+                        self.esp32_transport.send_off(device_id, task.bin_id)
+    
+    def _turn_off_all_lcds(self):
+        """모든 LCD OFF"""
+        self._turn_off_fullpick_lcds()
+        self._turn_off_prepick_lcds()
     
     # === 이벤트 핸들러 ===
     
