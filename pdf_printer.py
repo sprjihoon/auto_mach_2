@@ -693,6 +693,10 @@ class PDFPrinter(QObject):
                 base_rotated_width = base_width
                 base_rotated_height = base_height
             
+            # PIL import (회전을 위해)
+            from PIL import Image
+            import io
+            
             # 모든 페이지를 순회하며 추출
             for page_idx in range(start_page, end_page + 1):
                 page = doc[page_idx]
@@ -706,22 +710,7 @@ class PDFPrinter(QObject):
                 clip_width = clip_rect.width
                 clip_height = clip_rect.height
                 
-                # 회전 설정에 따른 크기 계산
-                if label_rotation in [90, 270]:
-                    rotated_width = clip_height
-                    rotated_height = clip_width
-                else:
-                    rotated_width = clip_width
-                    rotated_height = clip_height
-                
-                self.print_success.emit(f"📐 송장 크기: {clip_width:.1f}x{clip_height:.1f}pt → 회전 후: {rotated_width:.1f}x{rotated_height:.1f}pt")
-                
-                # 새 페이지 생성 (첫 페이지 크기 기준으로 통일)
-                new_page = optimized_doc.new_page(width=base_rotated_width, height=base_rotated_height)
-                
-                # MediaBox와 CropBox를 동일하게 설정 (핵심!)
-                new_page.set_mediabox(fitz.Rect(0, 0, base_rotated_width, base_rotated_height))
-                new_page.set_cropbox(fitz.Rect(0, 0, base_rotated_width, base_rotated_height))
+                self.print_success.emit(f"📐 송장 원본 크기: {clip_width:.1f}x{clip_height:.1f}pt")
                 
                 # 고해상도 렌더링 (원본 영역만)
                 dpi = 300
@@ -729,24 +718,48 @@ class PDFPrinter(QObject):
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
                 
-                # 회전 후 실제 이미지 크기 계산 (왼쪽 상단 정렬을 위해)
-                pix_width = pix.width / zoom  # 포인트 단위로 변환
-                pix_height = pix.height / zoom
+                # ★ PIL로 이미지 회전 (PyMuPDF rotate 옵션 대신 직접 회전)
+                # PIL Image로 변환
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 
-                # 회전 후 크기
-                if label_rotation in [90, 270]:
-                    final_img_width = pix_height
-                    final_img_height = pix_width
+                # PIL 회전 (반시계 방향이므로 조정 필요)
+                # PIL: 양수 = 반시계, PyMuPDF: 양수 = 시계
+                # 90도 → PIL -90 (또는 270)
+                # 180도 → PIL 180
+                # 270도 → PIL -270 (또는 90)
+                if label_rotation == 90:
+                    img_rotated = img.rotate(-90, expand=True)
+                elif label_rotation == 180:
+                    img_rotated = img.rotate(180, expand=True)
+                elif label_rotation == 270:
+                    img_rotated = img.rotate(-270, expand=True)
                 else:
-                    final_img_width = pix_width
-                    final_img_height = pix_height
+                    img_rotated = img  # 0도: 회전 없음
                 
-                # 왼쪽 상단(0,0)에서 시작하는 정확한 크기의 target_rect 설정
-                # keep_proportion=False로 변경하여 이미지가 지정된 rect에 정확히 맞도록 함
-                target_rect = fitz.Rect(0, 0, final_img_width, final_img_height)
-                self.print_success.emit(f"📍 이미지 배치: 왼쪽상단(0,0) → ({final_img_width:.1f}, {final_img_height:.1f})")
+                # 회전된 이미지 크기 (포인트 단위)
+                rotated_width = img_rotated.width / zoom
+                rotated_height = img_rotated.height / zoom
                 
-                new_page.insert_image(target_rect, pixmap=pix, rotate=label_rotation, keep_proportion=False, overlay=True)
+                self.print_success.emit(f"📐 회전 후 크기: {rotated_width:.1f}x{rotated_height:.1f}pt (회전: {label_rotation}도)")
+                
+                # 새 페이지 생성 (회전된 이미지 크기에 맞게)
+                new_page = optimized_doc.new_page(width=rotated_width, height=rotated_height)
+                
+                # MediaBox와 CropBox를 동일하게 설정
+                new_page.set_mediabox(fitz.Rect(0, 0, rotated_width, rotated_height))
+                new_page.set_cropbox(fitz.Rect(0, 0, rotated_width, rotated_height))
+                
+                # 회전된 PIL 이미지를 PNG 바이트로 변환
+                img_bytes = io.BytesIO()
+                img_rotated.save(img_bytes, format='PNG')
+                img_bytes.seek(0)
+                
+                # 왼쪽 상단(0,0)에서 시작하는 rect에 이미지 삽입
+                target_rect = fitz.Rect(0, 0, rotated_width, rotated_height)
+                self.print_success.emit(f"📍 이미지 배치: 왼쪽상단(0,0) → ({rotated_width:.1f}, {rotated_height:.1f})")
+                
+                # rotate=0 (이미 PIL로 회전됨), keep_proportion=False로 정확한 위치에 삽입
+                new_page.insert_image(target_rect, stream=img_bytes.getvalue(), keep_proportion=False, overlay=True)
             
             temp_path = self._temp_dir / f"{clean_tracking_no}.pdf"
             if temp_path.exists():
