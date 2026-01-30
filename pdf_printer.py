@@ -722,17 +722,14 @@ class PDFPrinter(QObject):
                 # PIL Image로 변환
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 
-                # PIL 회전 (반시계 방향이므로 조정 필요)
-                # PIL: 양수 = 반시계, PyMuPDF: 양수 = 시계
-                # 90도 → PIL -90 (또는 270)
-                # 180도 → PIL 180
-                # 270도 → PIL -270 (또는 90)
+                # PIL 회전 (양수 = 반시계 방향)
+                # 왼쪽 상단 0점 정렬을 위해 반시계 방향으로 회전
                 if label_rotation == 90:
-                    img_rotated = img.rotate(-90, expand=True)
+                    img_rotated = img.rotate(90, expand=True)  # 반시계 90도
                 elif label_rotation == 180:
                     img_rotated = img.rotate(180, expand=True)
                 elif label_rotation == 270:
-                    img_rotated = img.rotate(-270, expand=True)
+                    img_rotated = img.rotate(270, expand=True)  # 반시계 270도
                 else:
                     img_rotated = img  # 0도: 회전 없음
                 
