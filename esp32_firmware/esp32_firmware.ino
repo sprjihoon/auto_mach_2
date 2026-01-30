@@ -831,6 +831,9 @@ void handleSetupModeAnimation() {
 
 // ===== 설정 =====
 void setup() {
+    // 전원 안정화 대기 (노이즈 방지)
+    delay(500);
+    
     Serial.begin(115200);
     Serial.println("\n\n========================================");
     Serial.println("  ESP32 CYD Picking Device");
@@ -851,11 +854,20 @@ void setup() {
     digitalWrite(TFT_BL, HIGH);
     
     // TFT 초기화
+    delay(200);  // TFT 전원 안정화
     tft.init();
-    delay(100);  // 초기화 안정화 대기
-    tft.setRotation(0);  // 세로 모드 (0 또는 2), 가로: 1 또는 3
+    delay(200);  // init 후 안정화
     
-    // 화면 완전 클리어 (노이즈 방지)
+    // 모든 rotation에서 화면 클리어 (잔상 완전 제거)
+    for (int r = 0; r < 4; r++) {
+        tft.setRotation(r);
+        tft.fillScreen(TFT_BLACK);
+        delay(50);
+    }
+    
+    // 최종 rotation 설정
+    tft.setRotation(2);  // 세로 모드
+    delay(50);
     tft.fillScreen(TFT_BLACK);
     delay(50);
     tft.fillScreen(COLOR_BG);

@@ -12,20 +12,18 @@
 #define USER_SETUP_INFO "ESP32-2432S028 CYD Setup"
 
 // ==========================================================
-// Display Driver - ILI9341 for Cheap Yellow Display
+// Display Driver - Try ST7789 for some CYD versions
 // ==========================================================
-#define ILI9341_DRIVER
+// #define ILI9341_DRIVER
 
-// If ILI9341 doesn't work, try uncommenting this instead:
-// #define ST7789_DRIVER
+// ST7789 driver for some CYD boards
+#define ST7789_DRIVER
 
 // ==========================================================
 // Display Resolution
 // ==========================================================
-// ILI9341 driver automatically uses 240x320
-// Only define these for ST7789 or other drivers that need it
-// #define TFT_WIDTH  240
-// #define TFT_HEIGHT 320
+#define TFT_WIDTH  240
+#define TFT_HEIGHT 320
 
 // ==========================================================
 // ESP32-2432S028 (CYD) Pin Configuration
@@ -75,9 +73,9 @@
 #define USE_HSPI_PORT
 
 // If display colors are inverted, uncomment this:
-// #define TFT_INVERSION_ON
+#define TFT_INVERSION_OFF
 // Or this:
-// #define TFT_INVERSION_OFF
+// #define TFT_INVERSION_ON
 
 // RGB/BGR color order - CYD typically uses BGR
 #define TFT_RGB_ORDER TFT_BGR
