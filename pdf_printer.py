@@ -722,14 +722,14 @@ class PDFPrinter(QObject):
                 # PIL Image로 변환
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 
-                # PIL 회전 (양수 = 반시계 방향)
-                # 왼쪽 상단 0점 정렬을 위해 반시계 방향으로 회전
+                # PIL 회전 (양수 = 반시계 방향, 음수 = 시계 방향)
+                # 시계 방향 회전으로 설정
                 if label_rotation == 90:
-                    img_rotated = img.rotate(90, expand=True)  # 반시계 90도
+                    img_rotated = img.rotate(-90, expand=True)  # 시계 90도
                 elif label_rotation == 180:
                     img_rotated = img.rotate(180, expand=True)
                 elif label_rotation == 270:
-                    img_rotated = img.rotate(270, expand=True)  # 반시계 270도
+                    img_rotated = img.rotate(-270, expand=True)  # 시계 270도 = 반시계 90도
                 else:
                     img_rotated = img  # 0도: 회전 없음
                 

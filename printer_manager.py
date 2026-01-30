@@ -486,7 +486,15 @@ def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) ->
             printer_dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX)
             printer_dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY)
             
-            msg = f"프린터 영역: {printer_width}x{printer_height}, DPI: {printer_dpi_x}x{printer_dpi_y}"
+            # ★ 프린터 물리적 오프셋 (비인쇄 영역) - 왼쪽 상단 정렬을 위해 필요
+            try:
+                offset_x = hdc.GetDeviceCaps(win32con.PHYSICALOFFSETX)
+                offset_y = hdc.GetDeviceCaps(win32con.PHYSICALOFFSETY)
+            except:
+                offset_x = 0
+                offset_y = 0
+            
+            msg = f"프린터 영역: {printer_width}x{printer_height}, DPI: {printer_dpi_x}x{printer_dpi_y}, 오프셋: ({offset_x}, {offset_y})"
             print(msg)
             write_log(msg)
             
@@ -496,13 +504,12 @@ def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) ->
             mat = fitz.Matrix(zoom_x, zoom_y)
             pix = page.get_pixmap(matrix=mat)
             
-            # PIL Image로 변환 (PDF가 이미 270도 회전되어 있으므로 추가 회전 불필요)
+            # PIL Image로 변환
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             
             print(f"이미지: {img.width}x{img.height} → ", end="")
             
             # 이미지를 프린터 영역에 맞게 스케일링
-            # 높이를 프린터 높이에 정확히 맞춤 (1장만 출력되도록)
             scale = min(printer_width / img.width, printer_height / img.height)
             final_width = int(img.width * scale)
             final_height = int(img.height * scale)
@@ -522,7 +529,13 @@ def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) ->
             
             dib = ImageWin.Dib(img_resized)
             write_log("이미지 그리기...")
-            dib.draw(hdc.GetHandleOutput(), (0, 0, final_width, final_height))
+            
+            # ★ 물리적 오프셋을 빼서 실제 용지의 왼쪽 상단(0,0)에서 시작
+            # 오프셋을 빼면 인쇄 가능 영역 바깥으로 나가서 용지 끝에서 시작
+            draw_x = -offset_x
+            draw_y = -offset_y
+            write_log(f"그리기 좌표: ({draw_x}, {draw_y}) → ({draw_x + final_width}, {draw_y + final_height})")
+            dib.draw(hdc.GetHandleOutput(), (draw_x, draw_y, draw_x + final_width, draw_y + final_height))
             
             write_log("EndPage 호출...")
             hdc.EndPage()
