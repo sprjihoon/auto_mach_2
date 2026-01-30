@@ -1,9 +1,14 @@
 /**
  * ESP32 피킹 디바이스 펌웨어
  * 
+ * 하드웨어: ESP32-2432S028 (Cheap Yellow Display)
+ * - 2.8" TFT 320x240 ILI9341
+ * - 터치스크린 (XPT2046) - 미사용
+ * - RGB LED
+ * 
  * 기능:
  * - WiFi로 PC WebSocket 서버에 연결
- * - LCD에 BIN ID, 수량 표시
+ * - TFT에 BIN ID, 수량 표시
  * - NeoPixel LED로 색상 표시
  * - 버튼 누르면 완료 신호 전송
  * - 버튼 5초 길게 누르면 WiFi 설정 모드 진입
@@ -14,17 +19,11 @@
  * - WiFi SSID, 비밀번호, PC IP 주소 설정
  * - 설정 저장 후 자동 재부팅
  * 
- * 하드웨어:
- * - ESP32 DevKit
- * - I2C LCD 16x2 (주소 0x27)
- * - WS2812B NeoPixel (GPIO 15)
- * - 버튼 (GPIO 4, 풀업)
- * 
  * 라이브러리 필요:
+ * - TFT_eSPI (설정 필요)
  * - ArduinoJson
  * - WebSockets by Markus Sattler
  * - Adafruit NeoPixel
- * - LiquidCrystal_I2C
  */
 
 #include <WiFi.h>
@@ -32,32 +31,49 @@
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include <Adafruit_NeoPixel.h>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
 #include <Preferences.h>
+#include <TFT_eSPI.h>
+#include <SPI.h>
 
-// ===== 핀 설정 =====
-#define BUTTON_PIN      4      // 완료 버튼 (풀업)
-#define NEOPIXEL_PIN    15     // NeoPixel 데이터 핀
-#define NEOPIXEL_COUNT  8      // NeoPixel LED 개수
-#define I2C_SDA         21     // I2C SDA
-#define I2C_SCL         22     // I2C SCL
+// ===== CYD 핀 설정 =====
+// TFT는 TFT_eSPI User_Setup.h에서 설정됨
+#define BUTTON_PIN      0       // BOOT 버튼 (GPIO 0)
+#define NEOPIXEL_PIN    27      // 외부 NeoPixel (또는 RGB LED)
+#define NEOPIXEL_COUNT  8       // NeoPixel LED 개수
+
+// CYD 내장 RGB LED (active low)
+#define CYD_LED_RED     4
+#define CYD_LED_GREEN   16
+#define CYD_LED_BLUE    17
+
+// TFT 백라이트
+#define TFT_BL          21
 
 // ===== 설정 모드 =====
 #define SETUP_BUTTON_HOLD_TIME  5000   // 5초 길게 누르면 설정 모드
 #define AP_SSID                 "AutoMach_Setup"
 #define AP_PASSWORD             ""      // 빈 문자열 = 오픈 네트워크
 
+// ===== 색상 정의 (16비트 RGB565) =====
+#define COLOR_BG        TFT_BLACK
+#define COLOR_TEXT      TFT_WHITE
+#define COLOR_TITLE     TFT_CYAN
+#define COLOR_SUCCESS   TFT_GREEN
+#define COLOR_ERROR     TFT_RED
+#define COLOR_WARNING   TFT_ORANGE
+#define COLOR_INFO      TFT_YELLOW
+#define COLOR_SETUP     0x5D1F  // 보라색
+
 // ===== 객체 생성 =====
+TFT_eSPI tft = TFT_eSPI();
 WebSocketsClient webSocket;
 WebServer server(80);
 Adafruit_NeoPixel pixels(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
-LiquidCrystal_I2C lcd(0x27, 16, 2);
 Preferences preferences;
 
 // ===== WiFi 설정 (NVS에서 로드) =====
-String wifiSSID = "";
-String wifiPassword = "";
+String wifiSSID = "spring303";
+String wifiPassword = "wkdwlgns";
 String wsHost = "";
 int wsPort = 8765;
 
@@ -85,7 +101,59 @@ const unsigned long BLINK_INTERVAL = 500;
 // 현재 색상
 uint32_t currentColor = 0;
 
-// ===== 색상 정의 =====
+// ===== TFT 화면 유틸리티 =====
+void tftClear() {
+    // 전체 화면을 명시적으로 클리어 (노이즈 방지)
+    tft.fillRect(0, 0, tft.width(), tft.height(), COLOR_BG);
+}
+
+void tftDrawCentered(const char* text, int y, uint16_t color, int textSize) {
+    tft.setTextColor(color, COLOR_BG);
+    tft.setTextSize(textSize);
+    int textWidth = strlen(text) * 6 * textSize;
+    int x = (tft.width() - textWidth) / 2;
+    if (x < 0) x = 0;
+    tft.setCursor(x, y);
+    tft.print(text);
+}
+
+void tftDrawText(const char* text, int x, int y, uint16_t color, int textSize) {
+    tft.setTextColor(color, COLOR_BG);
+    tft.setTextSize(textSize);
+    tft.setCursor(x, y);
+    tft.print(text);
+}
+
+void tftDrawBigNumber(int num, int y, uint16_t color) {
+    char buf[16];
+    sprintf(buf, "%d", num);
+    tft.setTextColor(color, COLOR_BG);
+    tft.setTextSize(8);
+    int textWidth = strlen(buf) * 6 * 8;
+    int x = (tft.width() - textWidth) / 2;
+    if (x < 0) x = 0;
+    tft.setCursor(x, y);
+    tft.print(buf);
+}
+
+void tftDrawStatusBar(const char* status, uint16_t bgColor) {
+    tft.fillRect(0, tft.height() - 30, tft.width(), 30, bgColor);
+    tft.setTextColor(TFT_WHITE, bgColor);
+    tft.setTextSize(2);
+    int textWidth = strlen(status) * 6 * 2;
+    int x = (tft.width() - textWidth) / 2;
+    tft.setCursor(x, tft.height() - 22);
+    tft.print(status);
+}
+
+// ===== CYD 내장 LED 제어 =====
+void setCydLed(bool r, bool g, bool b) {
+    digitalWrite(CYD_LED_RED, !r);    // Active low
+    digitalWrite(CYD_LED_GREEN, !g);
+    digitalWrite(CYD_LED_BLUE, !b);
+}
+
+// ===== 색상 정의 (NeoPixel용) =====
 uint32_t getColor(String colorName) {
     if (colorName == "purple" || colorName == "보라") {
         return pixels.Color(128, 0, 128);
@@ -107,6 +175,19 @@ uint32_t getColor(String colorName) {
     return pixels.Color(255, 255, 255);
 }
 
+// 색상 이름을 TFT 색상으로 변환
+uint16_t getTftColor(String colorName) {
+    if (colorName == "purple" || colorName == "보라") return TFT_PURPLE;
+    if (colorName == "green" || colorName == "초록") return TFT_GREEN;
+    if (colorName == "red" || colorName == "빨강") return TFT_RED;
+    if (colorName == "blue" || colorName == "파랑") return TFT_BLUE;
+    if (colorName == "yellow" || colorName == "노랑") return TFT_YELLOW;
+    if (colorName == "orange" || colorName == "주황") return TFT_ORANGE;
+    if (colorName == "white" || colorName == "흰색") return TFT_WHITE;
+    if (colorName == "cyan" || colorName == "청록") return TFT_CYAN;
+    return TFT_WHITE;
+}
+
 // ===== 디바이스 ID 생성 (MAC 기반) =====
 String getDeviceId() {
     uint8_t mac[6];
@@ -119,8 +200,8 @@ String getDeviceId() {
 // ===== NVS에서 설정 로드 =====
 void loadSettings() {
     preferences.begin("automach", true);  // 읽기 전용
-    wifiSSID = preferences.getString("wifi_ssid", "");
-    wifiPassword = preferences.getString("wifi_pass", "");
+    wifiSSID = preferences.getString("wifi_ssid", wifiSSID);
+    wifiPassword = preferences.getString("wifi_pass", wifiPassword);
     wsHost = preferences.getString("ws_host", "");
     wsPort = preferences.getInt("ws_port", 8765);
     preferences.end();
@@ -178,50 +259,50 @@ String getSetupPage() {
 <body>
     <div class="container">
         <div class="card">
-            <h1>🔧 AutoMach 설정</h1>
-            <p class="subtitle">ESP32 피킹 디바이스 WiFi 설정</p>
+            <h1>AutoMach Setup</h1>
+            <p class="subtitle">ESP32 Picking Device WiFi Setup</p>
             <div class="device-id">)";
     html += deviceId;
     html += R"(</div>
             
             <form action="/save" method="POST">
-                <div class="section-title">WiFi 연결</div>
+                <div class="section-title">WiFi Connection</div>
                 
                 <div class="form-group">
-                    <label>WiFi 이름 (SSID)</label>
+                    <label>WiFi Name (SSID)</label>
                     <input type="text" name="ssid" value=")";
     html += wifiSSID;
-    html += R"(" required placeholder="WiFi 네트워크 이름">
+    html += R"(" required placeholder="WiFi network name">
                 </div>
                 
                 <div class="form-group">
-                    <label>WiFi 비밀번호</label>
+                    <label>WiFi Password</label>
                     <input type="password" name="password" value=")";
     html += wifiPassword;
-    html += R"(" placeholder="비밀번호 입력">
-                    <div class="hint">오픈 네트워크는 비워두세요</div>
+    html += R"(" placeholder="Enter password">
+                    <div class="hint">Leave empty for open network</div>
                 </div>
                 
                 <div class="divider"></div>
-                <div class="section-title">서버 연결</div>
+                <div class="section-title">Server Connection</div>
                 
                 <div class="form-group">
-                    <label>PC IP 주소</label>
+                    <label>PC IP Address</label>
                     <input type="text" name="host" value=")";
     html += wsHost;
-    html += R"(" required placeholder="예: 192.168.0.100">
-                    <div class="hint">PC에서 ipconfig 명령으로 확인</div>
+    html += R"(" required placeholder="e.g. 192.168.0.100">
+                    <div class="hint">Run ipconfig on PC to find</div>
                 </div>
                 
                 <div class="form-group">
-                    <label>포트 번호</label>
+                    <label>Port Number</label>
                     <input type="number" name="port" value=")";
     html += String(wsPort);
     html += R"(" required placeholder="8765">
-                    <div class="hint">기본값: 8765</div>
+                    <div class="hint">Default: 8765</div>
                 </div>
                 
-                <button type="submit">💾 설정 저장 및 재부팅</button>
+                <button type="submit">Save & Reboot</button>
             </form>
         </div>
     </div>
@@ -239,7 +320,7 @@ String getSavedPage() {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>설정 완료</title>
+    <title>Settings Saved</title>
     <style>
         * { font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
         body { margin: 0; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
@@ -252,11 +333,11 @@ String getSavedPage() {
 </head>
 <body>
     <div class="card">
-        <div class="icon">✅</div>
-        <h1>설정이 저장되었습니다!</h1>
-        <p>ESP32가 재부팅됩니다.<br>새로운 WiFi에 연결을 시도합니다.</p>
+        <div class="icon">OK</div>
+        <h1>Settings Saved!</h1>
+        <p>ESP32 will reboot now.<br>Connecting to new WiFi...</p>
         <div class="countdown" id="countdown">3</div>
-        <p style="font-size: 12px; color: #888;">이 핫스팟이 곧 사라집니다</p>
+        <p style="font-size: 12px; color: #888;">This hotspot will disappear</p>
     </div>
     <script>
         let count = 3;
@@ -286,18 +367,18 @@ void handleSave() {
     
     server.send(200, "text/html", getSavedPage());
     
-    // LCD에 표시
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Settings Saved!");
-    lcd.setCursor(0, 1);
-    lcd.print("Rebooting...");
+    // TFT에 표시
+    tftClear();
+    tftDrawCentered("SETTINGS", 60, COLOR_SUCCESS, 3);
+    tftDrawCentered("SAVED!", 100, COLOR_SUCCESS, 3);
+    tftDrawCentered("Rebooting...", 160, COLOR_TEXT, 2);
     
     // 성공 표시 (초록색)
     for (int i = 0; i < NEOPIXEL_COUNT; i++) {
         pixels.setPixelColor(i, pixels.Color(0, 255, 0));
     }
     pixels.show();
+    setCydLed(false, true, false);
     
     // 3초 후 재부팅
     delay(3000);
@@ -309,7 +390,7 @@ void startSetupMode() {
     setupMode = true;
     
     Serial.println("\n========================================");
-    Serial.println("  WiFi 설정 모드 진입!");
+    Serial.println("  WiFi Setup Mode!");
     Serial.println("========================================");
     
     // AP 모드로 전환
@@ -317,7 +398,7 @@ void startSetupMode() {
     WiFi.softAP(AP_SSID, AP_PASSWORD);
     
     IPAddress IP = WiFi.softAPIP();
-    Serial.print("AP IP 주소: ");
+    Serial.print("AP IP: ");
     Serial.println(IP);
     
     // 웹서버 설정
@@ -325,47 +406,62 @@ void startSetupMode() {
     server.on("/save", HTTP_POST, handleSave);
     server.begin();
     
-    Serial.println("웹서버 시작됨!");
-    Serial.println("1. '" + String(AP_SSID) + "' WiFi에 연결하세요");
-    Serial.println("2. 브라우저에서 http://192.168.4.1 접속");
+    Serial.println("Web server started!");
+    Serial.println("1. Connect to '" + String(AP_SSID) + "' WiFi");
+    Serial.println("2. Open http://192.168.4.1 in browser");
     Serial.println("========================================\n");
     
-    // LCD 표시
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Setup Mode");
-    lcd.setCursor(0, 1);
-    lcd.print("192.168.4.1");
+    // TFT 표시
+    tftClear();
+    tft.fillRect(0, 0, tft.width(), 50, COLOR_SETUP);
+    tftDrawCentered("SETUP MODE", 15, TFT_WHITE, 3);
     
-    // LED 표시 (파란색 순환)
+    tftDrawCentered("Connect to WiFi:", 70, COLOR_TEXT, 2);
+    tftDrawCentered(AP_SSID, 100, COLOR_INFO, 2);
+    
+    tftDrawCentered("Then open:", 140, COLOR_TEXT, 2);
+    tftDrawCentered("192.168.4.1", 170, COLOR_SUCCESS, 3);
+    
+    tftDrawCentered(deviceId.c_str(), 220, TFT_DARKGREY, 1);
+    
+    // LED 표시 (파란색)
     for (int i = 0; i < NEOPIXEL_COUNT; i++) {
         pixels.setPixelColor(i, pixels.Color(0, 100, 255));
     }
     pixels.show();
+    setCydLed(false, false, true);
 }
 
 // ===== WiFi 연결 =====
 void connectWiFi() {
     if (wifiSSID.length() == 0) {
-        Serial.println("WiFi 설정 없음! 설정 모드로 진입합니다.");
+        Serial.println("No WiFi settings! Entering setup mode.");
         startSetupMode();
         return;
     }
     
-    Serial.println("WiFi 연결 중: " + wifiSSID);
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("WiFi...");
-    lcd.setCursor(0, 1);
-    lcd.print(wifiSSID.substring(0, 16));
+    Serial.println("Connecting to WiFi: " + wifiSSID);
+    
+    // TFT 표시
+    tftClear();
+    tftDrawCentered("CONNECTING", 40, COLOR_TITLE, 3);
+    tftDrawCentered("WiFi", 80, COLOR_TEXT, 2);
+    tftDrawCentered(wifiSSID.substring(0, 20).c_str(), 110, COLOR_INFO, 2);
     
     WiFi.mode(WIFI_STA);
     WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
     
     int attempts = 0;
+    int dotX = 40;
     while (WiFi.status() != WL_CONNECTED && attempts < 30) {
         delay(500);
         Serial.print(".");
+        
+        // 진행 표시
+        tft.fillCircle(dotX + (attempts % 10) * 20, 160, 5, COLOR_INFO);
+        if ((attempts % 10) == 9) {
+            tft.fillRect(40, 150, 200, 20, COLOR_BG);
+        }
         
         // 연결 중 LED 애니메이션
         pixels.setPixelColor(attempts % NEOPIXEL_COUNT, pixels.Color(0, 0, 255));
@@ -379,37 +475,43 @@ void connectWiFi() {
     pixels.show();
     
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\nWiFi 연결됨!");
+        Serial.println("\nWiFi Connected!");
         Serial.print("IP: ");
         Serial.println(WiFi.localIP());
         
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("WiFi OK");
-        lcd.setCursor(0, 1);
-        lcd.print(WiFi.localIP());
+        // TFT 표시
+        tftClear();
+        tftDrawCentered("WiFi OK", 50, COLOR_SUCCESS, 3);
+        
+        char ipStr[20];
+        sprintf(ipStr, "%s", WiFi.localIP().toString().c_str());
+        tftDrawCentered(ipStr, 100, COLOR_TEXT, 2);
+        
+        tftDrawCentered(wifiSSID.substring(0, 16).c_str(), 140, TFT_DARKGREY, 2);
         
         // 성공 표시 (초록색)
         for (int i = 0; i < NEOPIXEL_COUNT; i++) {
             pixels.setPixelColor(i, pixels.Color(0, 255, 0));
         }
         pixels.show();
-        delay(1000);
+        setCydLed(false, true, false);
+        delay(1500);
     } else {
-        Serial.println("\nWiFi 연결 실패!");
-        Serial.println("설정 모드로 진입합니다...");
+        Serial.println("\nWiFi connection failed!");
+        Serial.println("Entering setup mode...");
         
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("WiFi FAIL");
-        lcd.setCursor(0, 1);
-        lcd.print("Setup mode...");
+        // TFT 표시
+        tftClear();
+        tftDrawCentered("WiFi FAIL", 60, COLOR_ERROR, 3);
+        tftDrawCentered("Entering", 110, COLOR_TEXT, 2);
+        tftDrawCentered("Setup Mode...", 140, COLOR_TEXT, 2);
         
         // 실패 표시 (빨간색)
         for (int i = 0; i < NEOPIXEL_COUNT; i++) {
             pixels.setPixelColor(i, pixels.Color(255, 0, 0));
         }
         pixels.show();
+        setCydLed(true, false, false);
         delay(2000);
         
         // 설정 모드로 전환
@@ -421,46 +523,49 @@ void connectWiFi() {
 void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
     switch (type) {
         case WStype_DISCONNECTED:
-            Serial.println("[WS] 연결 해제됨");
+            Serial.println("[WS] Disconnected");
             isConnected = false;
-            lcd.clear();
-            lcd.setCursor(0, 0);
-            lcd.print("Disconnected");
+            
+            tftClear();
+            tftDrawCentered("DISCONNECTED", 80, COLOR_WARNING, 2);
+            tftDrawCentered("Reconnecting...", 120, COLOR_TEXT, 2);
+            tftDrawStatusBar("OFFLINE", COLOR_ERROR);
             
             for (int i = 0; i < NEOPIXEL_COUNT; i++) {
                 pixels.setPixelColor(i, pixels.Color(255, 165, 0));
             }
             pixels.show();
+            setCydLed(true, true, false);  // 주황색
             break;
             
         case WStype_CONNECTED:
-            Serial.println("[WS] 연결됨!");
+            Serial.println("[WS] Connected!");
             isConnected = true;
             
             sendHello();
             
-            lcd.clear();
-            lcd.setCursor(0, 0);
-            lcd.print("Connected!");
-            lcd.setCursor(0, 1);
-            lcd.print(deviceId);
+            tftClear();
+            tftDrawCentered("CONNECTED", 80, COLOR_SUCCESS, 3);
+            tftDrawCentered(deviceId.c_str(), 130, TFT_DARKGREY, 2);
+            tftDrawStatusBar("ONLINE", COLOR_SUCCESS);
             
             for (int i = 0; i < NEOPIXEL_COUNT; i++) {
                 pixels.setPixelColor(i, pixels.Color(0, 255, 0));
             }
             pixels.show();
+            setCydLed(false, true, false);
             delay(500);
             
             showStandby();
             break;
             
         case WStype_TEXT:
-            Serial.printf("[WS] 수신: %s\n", payload);
+            Serial.printf("[WS] Received: %s\n", payload);
             handleMessage((char*)payload);
             break;
             
         case WStype_ERROR:
-            Serial.println("[WS] 에러!");
+            Serial.println("[WS] Error!");
             break;
     }
 }
@@ -474,13 +579,13 @@ void sendHello() {
     String json;
     serializeJson(doc, json);
     webSocket.sendTXT(json);
-    Serial.println("[WS] Hello 전송: " + json);
+    Serial.println("[WS] Hello sent: " + json);
 }
 
 // ===== Done 메시지 전송 =====
 void sendDone() {
     if (bindedBinId.length() == 0) {
-        Serial.println("[WS] BIN 바인딩 안됨, done 전송 안함");
+        Serial.println("[WS] No BIN binding, not sending done");
         return;
     }
     
@@ -492,18 +597,21 @@ void sendDone() {
     String json;
     serializeJson(doc, json);
     webSocket.sendTXT(json);
-    Serial.println("[WS] Done 전송: " + json);
+    Serial.println("[WS] Done sent: " + json);
     
+    // 완료 애니메이션
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < NEOPIXEL_COUNT; j++) {
             pixels.setPixelColor(j, pixels.Color(0, 255, 0));
         }
         pixels.show();
+        tft.fillScreen(COLOR_SUCCESS);
         delay(100);
         for (int j = 0; j < NEOPIXEL_COUNT; j++) {
             pixels.setPixelColor(j, 0);
         }
         pixels.show();
+        tft.fillScreen(COLOR_BG);
         delay(100);
     }
     
@@ -516,7 +624,7 @@ void handleMessage(const char* payload) {
     DeserializationError error = deserializeJson(doc, payload);
     
     if (error) {
-        Serial.println("JSON 파싱 오류!");
+        Serial.println("JSON parsing error!");
         return;
     }
     
@@ -524,13 +632,12 @@ void handleMessage(const char* payload) {
     
     if (msgType == "bind") {
         bindedBinId = doc["bin_id"].as<String>();
-        Serial.println("바인딩됨: " + bindedBinId);
+        Serial.println("Bound to: " + bindedBinId);
         
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("Bound to:");
-        lcd.setCursor(0, 1);
-        lcd.print(bindedBinId);
+        tftClear();
+        tftDrawCentered("BOUND TO", 60, COLOR_TITLE, 2);
+        tftDrawCentered(bindedBinId.c_str(), 100, COLOR_SUCCESS, 3);
+        tftDrawStatusBar("READY", COLOR_SUCCESS);
         
     } else if (msgType == "display") {
         currentMode = doc["mode"].as<String>();
@@ -542,13 +649,28 @@ void handleMessage(const char* payload) {
         Serial.printf("Display: bin=%s, color=%s, qty=%d, blink=%d\n",
                       binId.c_str(), color.c_str(), currentQty, blinkEnabled);
         
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print(binId);
-        lcd.setCursor(0, 1);
-        lcd.print("Qty: ");
-        lcd.print(currentQty);
+        // TFT 표시
+        uint16_t tftColor = getTftColor(color);
         
+        tftClear();
+        
+        // 상단 헤더 (색상 배경)
+        tft.fillRect(0, 0, tft.width(), 45, tftColor);
+        tftDrawCentered(binId.c_str(), 10, TFT_WHITE, 3);
+        
+        // 수량 (큰 숫자)
+        tftDrawCentered("QTY", 60, COLOR_TEXT, 2);
+        tftDrawBigNumber(currentQty, 90, tftColor);
+        
+        // 모드 표시
+        if (currentMode.length() > 0) {
+            tftDrawCentered(currentMode.c_str(), 180, TFT_DARKGREY, 2);
+        }
+        
+        // 상태바
+        tftDrawStatusBar("PICKING", tftColor);
+        
+        // NeoPixel LED
         currentColor = getColor(color);
         for (int i = 0; i < NEOPIXEL_COUNT; i++) {
             pixels.setPixelColor(i, currentColor);
@@ -575,20 +697,35 @@ void handleMessage(const char* payload) {
 
 // ===== 대기 상태 표시 =====
 void showStandby() {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Ready");
-    lcd.setCursor(0, 1);
+    tftClear();
+    
+    tft.fillRect(0, 0, tft.width(), 45, TFT_DARKGREY);
+    tftDrawCentered("READY", 10, TFT_WHITE, 3);
+    
     if (bindedBinId.length() > 0) {
-        lcd.print(bindedBinId);
+        tftDrawCentered("Assigned BIN:", 70, COLOR_TEXT, 2);
+        tftDrawCentered(bindedBinId.c_str(), 100, COLOR_SUCCESS, 3);
     } else {
-        lcd.print("(unbound)");
+        tftDrawCentered("(unbound)", 90, TFT_DARKGREY, 2);
     }
+    
+    // 장치 ID
+    tftDrawCentered(deviceId.c_str(), 150, TFT_DARKGREY, 1);
+    
+    // IP 주소
+    if (WiFi.status() == WL_CONNECTED) {
+        char ipStr[20];
+        sprintf(ipStr, "%s", WiFi.localIP().toString().c_str());
+        tftDrawCentered(ipStr, 170, TFT_DARKGREY, 1);
+    }
+    
+    tftDrawStatusBar("STANDBY", TFT_DARKGREY);
     
     for (int i = 0; i < NEOPIXEL_COUNT; i++) {
         pixels.setPixelColor(i, pixels.Color(10, 10, 10));
     }
     pixels.show();
+    setCydLed(false, false, false);
 }
 
 // ===== 깜빡임 처리 =====
@@ -626,7 +763,12 @@ void handleButton() {
         if (!buttonHeldForSetup && (now - buttonPressStart >= SETUP_BUTTON_HOLD_TIME)) {
             buttonHeldForSetup = true;
             
-            Serial.println("\n버튼 5초 유지 - 설정 모드 진입!");
+            Serial.println("\nButton held 5s - Entering setup mode!");
+            
+            // TFT 피드백
+            tftClear();
+            tftDrawCentered("ENTERING", 80, COLOR_SETUP, 3);
+            tftDrawCentered("SETUP MODE", 120, COLOR_SETUP, 3);
             
             // LED로 피드백 (보라색 깜빡임)
             for (int i = 0; i < 3; i++) {
@@ -634,9 +776,11 @@ void handleButton() {
                     pixels.setPixelColor(j, pixels.Color(128, 0, 128));
                 }
                 pixels.show();
+                setCydLed(true, false, true);
                 delay(200);
                 pixels.clear();
                 pixels.show();
+                setCydLed(false, false, false);
                 delay(200);
             }
             
@@ -652,7 +796,7 @@ void handleButton() {
                 if (now - lastButtonTime > DEBOUNCE_TIME) {
                     lastButtonTime = now;
                     
-                    Serial.println("버튼 눌림!");
+                    Serial.println("Button pressed!");
                     
                     if (isConnected && !setupMode) {
                         sendDone();
@@ -689,22 +833,38 @@ void handleSetupModeAnimation() {
 void setup() {
     Serial.begin(115200);
     Serial.println("\n\n========================================");
-    Serial.println("  ESP32 피킹 디바이스 시작");
-    Serial.println("  버튼 5초 누르기 = WiFi 설정 모드");
+    Serial.println("  ESP32 CYD Picking Device");
+    Serial.println("  Hold button 5s = WiFi Setup Mode");
     Serial.println("========================================");
     
-    // 버튼 핀 설정
+    // CYD 내장 LED 핀 설정
+    pinMode(CYD_LED_RED, OUTPUT);
+    pinMode(CYD_LED_GREEN, OUTPUT);
+    pinMode(CYD_LED_BLUE, OUTPUT);
+    setCydLed(false, false, false);
+    
+    // 버튼 핀 설정 (BOOT 버튼 GPIO 0)
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     
-    // I2C 초기화
-    Wire.begin(I2C_SDA, I2C_SCL);
+    // TFT 백라이트
+    pinMode(TFT_BL, OUTPUT);
+    digitalWrite(TFT_BL, HIGH);
     
-    // LCD 초기화
-    lcd.init();
-    lcd.backlight();
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Initializing...");
+    // TFT 초기화
+    tft.init();
+    delay(100);  // 초기화 안정화 대기
+    tft.setRotation(0);  // 세로 모드 (0 또는 2), 가로: 1 또는 3
+    
+    // 화면 완전 클리어 (노이즈 방지)
+    tft.fillScreen(TFT_BLACK);
+    delay(50);
+    tft.fillScreen(COLOR_BG);
+    tft.setTextWrap(false);
+    
+    // 시작 화면
+    tftDrawCentered("AutoMach", 60, COLOR_TITLE, 3);
+    tftDrawCentered("Picking Device", 100, COLOR_TEXT, 2);
+    tftDrawCentered("Initializing...", 160, TFT_DARKGREY, 2);
     
     // NeoPixel 초기화
     pixels.begin();
@@ -728,12 +888,11 @@ void setup() {
     
     // 부팅 시 버튼이 눌려있으면 설정 모드
     if (digitalRead(BUTTON_PIN) == LOW) {
-        Serial.println("버튼 누른 채 부팅 - 설정 모드!");
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("Release button");
-        lcd.setCursor(0, 1);
-        lcd.print("for setup mode");
+        Serial.println("Button held during boot - Setup mode!");
+        
+        tftClear();
+        tftDrawCentered("Release button", 80, COLOR_WARNING, 2);
+        tftDrawCentered("for setup mode", 110, COLOR_WARNING, 2);
         
         // 버튼 떼기 대기
         while (digitalRead(BUTTON_PIN) == LOW) {
@@ -750,17 +909,16 @@ void setup() {
     
     // 설정 모드가 아니면 WebSocket 연결
     if (!setupMode && WiFi.status() == WL_CONNECTED) {
-        Serial.println("WebSocket 연결 중: " + wsHost + ":" + String(wsPort));
+        Serial.println("Connecting WebSocket: " + wsHost + ":" + String(wsPort));
         
         webSocket.begin(wsHost.c_str(), wsPort, "/");
         webSocket.onEvent(webSocketEvent);
         webSocket.setReconnectInterval(5000);
         
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("Connecting WS...");
-        lcd.setCursor(0, 1);
-        lcd.print(wsHost);
+        tftClear();
+        tftDrawCentered("Connecting", 60, COLOR_TITLE, 3);
+        tftDrawCentered("WebSocket...", 100, COLOR_TEXT, 2);
+        tftDrawCentered(wsHost.c_str(), 140, TFT_DARKGREY, 2);
     }
 }
 
@@ -780,7 +938,7 @@ void loop() {
     
     // WiFi 재연결
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("WiFi 재연결 시도...");
+        Serial.println("WiFi reconnecting...");
         connectWiFi();
         
         if (setupMode) return;  // 설정 모드로 전환된 경우

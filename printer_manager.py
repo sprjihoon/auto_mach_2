@@ -7,6 +7,35 @@ import json
 from pathlib import Path
 from typing import Optional, List, Dict
 import tempfile
+from datetime import datetime
+
+
+def get_log_path() -> Path:
+    """로그 파일 경로 반환"""
+    base_path = Path(__file__).parent
+    return base_path / "printer_log.txt"
+
+
+def write_log(message: str):
+    """로그 파일에 메시지 기록"""
+    try:
+        log_path = get_log_path()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {message}\n")
+    except Exception:
+        pass  # 로그 기록 실패해도 무시
+
+
+def clear_log():
+    """로그 파일 초기화 (새 세션 시작 시)"""
+    try:
+        log_path = get_log_path()
+        # 파일이 너무 크면 (1MB 이상) 초기화
+        if log_path.exists() and log_path.stat().st_size > 1024 * 1024:
+            log_path.unlink()
+    except Exception:
+        pass
 
 # win32api, win32print는 선택적 (pywin32 설치 시에만 사용)
 try:
@@ -341,71 +370,113 @@ def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) ->
     Returns:
         출력 성공 여부
     """
+    write_log(f"========== 출력 시작 ==========")
+    write_log(f"PDF 경로: {pdf_path}")
+    write_log(f"요청된 프린터: {printer_name}")
+    
+    # 시스템 정보 로깅
+    try:
+        import platform
+        write_log(f"시스템: {platform.system()} {platform.release()}")
+        write_log(f"컴퓨터 이름: {platform.node()}")
+    except Exception:
+        pass
+    
     if not os.path.exists(pdf_path):
-        print(f"PDF 파일 없음: {pdf_path}")
+        msg = f"PDF 파일 없음: {pdf_path}"
+        print(msg)
+        write_log(f"[오류] {msg}")
         return False
     
     # 필수 모듈 확인
     if not HAS_FITZ:
-        print("PyMuPDF가 설치되지 않아 PDF 출력을 할 수 없습니다. pip install PyMuPDF")
+        msg = "PyMuPDF가 설치되지 않아 PDF 출력을 할 수 없습니다. pip install PyMuPDF"
+        print(msg)
+        write_log(f"[오류] {msg}")
         return False
     
     if not HAS_PIL:
-        print("Pillow가 설치되지 않아 PDF 출력을 할 수 없습니다. pip install Pillow")
+        msg = "Pillow가 설치되지 않아 PDF 출력을 할 수 없습니다. pip install Pillow"
+        print(msg)
+        write_log(f"[오류] {msg}")
         return False
     
     if not HAS_WIN32UI or not HAS_WIN32API:
-        print("pywin32가 설치되지 않아 PDF 출력을 할 수 없습니다. pip install pywin32")
+        msg = "pywin32가 설치되지 않아 PDF 출력을 할 수 없습니다. pip install pywin32"
+        print(msg)
+        write_log(f"[오류] {msg}")
         # 대안: os.startfile 사용
         try:
             os.startfile(pdf_path, "print")
-            print(f"기본 프로그램으로 출력 시도: {pdf_path}")
+            msg = f"기본 프로그램으로 출력 시도: {pdf_path}"
+            print(msg)
+            write_log(f"[대체] {msg}")
             return True
         except Exception as e:
-            print(f"대체 출력 실패: {e}")
+            msg = f"대체 출력 실패: {e}"
+            print(msg)
+            write_log(f"[오류] {msg}")
             return False
+    
+    # 사용 가능한 프린터 목록 로깅
+    printers = get_printers()
+    write_log(f"사용 가능한 프린터 목록: {printers}")
     
     # 프린터 이름이 없으면 기본 프린터 사용
     if not printer_name and HAS_WIN32API:
         try:
             printer_name = win32print.GetDefaultPrinter()
-        except Exception:
+            write_log(f"기본 프린터 사용: {printer_name}")
+        except Exception as e:
+            write_log(f"[오류] 기본 프린터 가져오기 실패: {e}")
             pass
     
     # 프린터 존재 확인
     if printer_name and HAS_WIN32API:
-        printers = get_printers()
         if printer_name not in printers:
-            print(f"프린터를 찾을 수 없습니다: {printer_name}")
+            msg = f"프린터를 찾을 수 없습니다: {printer_name}"
+            print(msg)
+            write_log(f"[오류] {msg}")
+            write_log(f"[힌트] 설정에서 프린터를 다시 선택해주세요. 사용 가능: {printers}")
             return False
     
     # PyMuPDF + win32ui로 직접 출력 (1장만 출력되도록 최적화)
     try:
         import ctypes
         
-        print(f"=== print_pdf_with_printer 호출: {printer_name} ===")
+        msg = f"=== print_pdf_with_printer 호출: {printer_name} ==="
+        print(msg)
+        write_log(msg)
         
         # PDF 열기
         doc = fitz.open(pdf_path)
-        print(f"PDF 페이지 수: {len(doc)}")
+        msg = f"PDF 페이지 수: {len(doc)}"
+        print(msg)
+        write_log(msg)
         
         # 첫 페이지만 출력
         if len(doc) > 0:
             page = doc[0]
             
             # 프린터 DEVMODE 가져오기 및 수정
+            write_log(f"프린터 열기 시도: {printer_name}")
             printer_handle = win32print.OpenPrinter(printer_name)
             try:
                 printer_info = win32print.GetPrinter(printer_handle, 2)
                 devmode = printer_info['pDevMode']
                 
                 # 용지 정보 로그
-                print(f"프린터 용지: {devmode.PaperWidth/10 if devmode.PaperWidth else 'N/A'}mm x {devmode.PaperLength/10 if devmode.PaperLength else 'N/A'}mm")
+                paper_width = devmode.PaperWidth/10 if devmode.PaperWidth else 'N/A'
+                paper_length = devmode.PaperLength/10 if devmode.PaperLength else 'N/A'
+                msg = f"프린터 용지: {paper_width}mm x {paper_length}mm"
+                print(msg)
+                write_log(msg)
                 
             finally:
                 win32print.ClosePrinter(printer_handle)
             
             # 프린터 DC 생성 (DEVMODE 적용)
+            write_log("프린터 DC 생성 중...")
             hdc = win32ui.CreateDC()
             hdc.CreatePrinterDC(printer_name)
             
@@ -415,7 +486,9 @@ def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) ->
             printer_dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX)
             printer_dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY)
             
-            print(f"프린터 영역: {printer_width}x{printer_height}, DPI: {printer_dpi_x}x{printer_dpi_y}")
+            msg = f"프린터 영역: {printer_width}x{printer_height}, DPI: {printer_dpi_x}x{printer_dpi_y}"
+            print(msg)
+            write_log(msg)
             
             # PDF를 프린터 DPI로 렌더링
             zoom_x = printer_dpi_x / 72
@@ -434,32 +507,46 @@ def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) ->
             final_width = int(img.width * scale)
             final_height = int(img.height * scale)
             
+            msg = f"이미지: {img.width}x{img.height} → {final_width}x{final_height} (scale: {scale:.2f})"
             print(f"{final_width}x{final_height} (scale: {scale:.2f})")
+            write_log(msg)
             
             # 이미지를 최종 크기로 리사이즈
             img_resized = img.resize((final_width, final_height), Image.LANCZOS)
             
             # 출력
+            write_log("StartDoc 호출...")
             hdc.StartDoc("Label")
+            write_log("StartPage 호출...")
             hdc.StartPage()
             
             dib = ImageWin.Dib(img_resized)
+            write_log("이미지 그리기...")
             dib.draw(hdc.GetHandleOutput(), (0, 0, final_width, final_height))
             
+            write_log("EndPage 호출...")
             hdc.EndPage()
+            write_log("EndDoc 호출...")
             hdc.EndDoc()
             hdc.DeleteDC()
             
             print(f"출력 완료")
+            write_log("출력 완료")
         
         doc.close()
-        print(f"직접 출력 성공: {pdf_path} → {printer_name}")
+        msg = f"직접 출력 성공: {pdf_path} → {printer_name}"
+        print(msg)
+        write_log(f"[성공] {msg}")
         return True
         
     except Exception as e:
-        print(f"출력 실패: {str(e)}")
         import traceback
+        error_msg = f"출력 실패: {str(e)}"
+        error_traceback = traceback.format_exc()
+        print(error_msg)
         traceback.print_exc()
+        write_log(f"[오류] {error_msg}")
+        write_log(f"[상세오류]\n{error_traceback}")
         return False
 
 
