@@ -646,29 +646,51 @@ void handleMessage(const char* payload) {
         currentQty = doc["qty"].as<int>();
         blinkEnabled = doc["blink"] | false;
         
-        Serial.printf("Display: bin=%s, color=%s, qty=%d, blink=%d\n",
-                      binId.c_str(), color.c_str(), currentQty, blinkEnabled);
+        Serial.printf("Display: bin=%s, color=%s, qty=%d, blink=%d, mode=%s\n",
+                      binId.c_str(), color.c_str(), currentQty, blinkEnabled, currentMode.c_str());
         
         // TFT 표시
         uint16_t tftColor = getTftColor(color);
         
         tftClear();
         
-        // 상단 헤더 (색상 배경)
-        tft.fillRect(0, 0, tft.width(), 45, tftColor);
-        tftDrawCentered(binId.c_str(), 10, TFT_WHITE, 3);
-        
-        // 수량 (큰 숫자)
-        tftDrawCentered("QTY", 60, COLOR_TEXT, 2);
-        tftDrawBigNumber(currentQty, 90, tftColor);
-        
-        // 모드 표시
-        if (currentMode.length() > 0) {
-            tftDrawCentered(currentMode.c_str(), 180, TFT_DARKGREY, 2);
+        // 모드에 따른 배지 색상 결정
+        uint16_t modeBadgeColor;
+        const char* modeLabel;
+        if (currentMode == "full_pick") {
+            modeBadgeColor = TFT_PURPLE;
+            modeLabel = "FULL";
+        } else if (currentMode == "pre_pick") {
+            modeBadgeColor = TFT_ORANGE;
+            modeLabel = "PRE";
+        } else {
+            modeBadgeColor = TFT_DARKGREY;
+            modeLabel = currentMode.c_str();
         }
         
-        // 상태바
-        tftDrawStatusBar("PICKING", tftColor);
+        // 상단 모드 배지 (왼쪽 상단)
+        tft.fillRoundRect(5, 5, 50, 20, 4, modeBadgeColor);
+        tft.setTextColor(TFT_WHITE, modeBadgeColor);
+        tft.setTextSize(1);
+        tft.setCursor(10, 11);
+        tft.print(modeLabel);
+        
+        // BIN ID (상단 중앙, 큰 글씨)
+        tft.fillRect(0, 30, tft.width(), 45, tftColor);
+        tftDrawCentered(binId.c_str(), 38, TFT_WHITE, 3);
+        
+        // 수량 (큰 숫자)
+        tftDrawCentered("QTY", 90, COLOR_TEXT, 2);
+        tftDrawBigNumber(currentQty, 115, tftColor);
+        
+        // 상태바 (모드에 따른 텍스트)
+        if (currentMode == "full_pick") {
+            tftDrawStatusBar("FULL PICK", tftColor);
+        } else if (currentMode == "pre_pick") {
+            tftDrawStatusBar("PRE PICK", tftColor);
+        } else {
+            tftDrawStatusBar("PICKING", tftColor);
+        }
         
         // NeoPixel LED
         currentColor = getColor(color);

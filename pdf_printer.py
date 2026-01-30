@@ -729,9 +729,24 @@ class PDFPrinter(QObject):
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
                 
-                # 이미지를 새 페이지에 삽입 (첫 페이지 크기 기준, 회전 적용)
-                target_rect = fitz.Rect(0, 0, base_rotated_width, base_rotated_height)
-                new_page.insert_image(target_rect, pixmap=pix, rotate=label_rotation, keep_proportion=True, overlay=True)
+                # 회전 후 실제 이미지 크기 계산 (왼쪽 상단 정렬을 위해)
+                pix_width = pix.width / zoom  # 포인트 단위로 변환
+                pix_height = pix.height / zoom
+                
+                # 회전 후 크기
+                if label_rotation in [90, 270]:
+                    final_img_width = pix_height
+                    final_img_height = pix_width
+                else:
+                    final_img_width = pix_width
+                    final_img_height = pix_height
+                
+                # 왼쪽 상단(0,0)에서 시작하는 정확한 크기의 target_rect 설정
+                # keep_proportion=False로 변경하여 이미지가 지정된 rect에 정확히 맞도록 함
+                target_rect = fitz.Rect(0, 0, final_img_width, final_img_height)
+                self.print_success.emit(f"📍 이미지 배치: 왼쪽상단(0,0) → ({final_img_width:.1f}, {final_img_height:.1f})")
+                
+                new_page.insert_image(target_rect, pixmap=pix, rotate=label_rotation, keep_proportion=False, overlay=True)
             
             temp_path = self._temp_dir / f"{clean_tracking_no}.pdf"
             if temp_path.exists():

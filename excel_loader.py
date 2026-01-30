@@ -462,13 +462,13 @@ class ExcelLoader(QObject):
             return False, ""
     
     def find_by_barcode(self, barcode: str) -> pd.DataFrame:
-        """바코드로 행 검색 (used=0인 것만)"""
+        """바코드로 행 검색 (used=0인 것만, 대소문자 무시)"""
         if self.df is None:
             return pd.DataFrame()
         
-        # 바코드를 문자열로 변환하고 공백 제거하여 비교
-        barcode = str(barcode).strip()
-        df_barcodes = self.df['barcode'].astype(str).str.strip()
+        # 바코드를 문자열로 변환하고 공백 제거, 대소문자 무시하여 비교
+        barcode = str(barcode).strip().upper()  # 대소문자 무시
+        df_barcodes = self.df['barcode'].astype(str).str.strip().str.upper()  # 대소문자 무시
         
         mask = (df_barcodes == barcode) & (self.df['used'] == 0)
         return self.df[mask].copy()

@@ -92,6 +92,10 @@ class OrderProcessor(QObject):
         
         # 우선순위 규칙 (기본값은 excel_loader에서 관리)
         self._priority_rules: Optional[dict] = None
+        
+        # ★ 세션 내 출력 완료된 송장 추적 (중복 출력 방지)
+        self._printed_tracking_nos: set = set()
+        self._printing_tracking: set = set()  # 출력 진행 중인 송장
     
     @property
     def current_tracking_no(self) -> Optional[str]:
@@ -164,8 +168,9 @@ class OrderProcessor(QObject):
         # 1. 현재 작업 중인 송장이 있으면 그 송장에서만 찾기
         if self._current_tracking_no:
             current_group = self.excel.get_tracking_group(self._current_tracking_no)
+            # 대소문자 무시하여 비교
             current_match = current_group[
-                (current_group['barcode'].astype(str).str.strip() == barcode) & 
+                (current_group['barcode'].astype(str).str.strip().str.upper() == barcode.upper()) & 
                 (current_group['scanned_qty'] < current_group['qty'])
             ]
             
@@ -282,36 +287,39 @@ class OrderProcessor(QObject):
             # 송장 완료! 스캔 완료 후 PDF 출력
             self.log_message.emit(f"[완료] 송장 {tracking_no} 구성 완료!")
             
-            # ★ 중복 출력 방지: 이미 used=1이면 출력 건너뛰기
-            if self.excel.is_tracking_used(tracking_no):
-                self.log_message.emit(f"⚠️ [중복 방지] 송장 {tracking_no}은(는) 이미 출력 완료됨 → 출력 건너뛰기")
+            # ★ 중복 출력 방지 (3단계 체크)
+            # 1단계: 이미 출력 완료된 송장인지 확인 (세션 내 추적)
+            if tracking_no in self._printed_tracking_nos:
+                self.log_message.emit(f"⚠️ [중복 방지] 송장 {tracking_no}은(는) 이 세션에서 이미 출력됨 → 출력 건너뛰기")
+            # 2단계: 엑셀에서 used=1인지 확인
+            elif self.excel.is_tracking_used(tracking_no):
+                self.log_message.emit(f"⚠️ [중복 방지] 송장 {tracking_no}은(는) 이미 처리 완료됨 → 출력 건너뛰기")
+            # 3단계: 현재 출력 진행 중인지 확인
+            elif tracking_no in self._printing_tracking:
+                self.log_message.emit(f"⚠️ [중복 방지] 송장 {tracking_no} 출력 진행 중 → 건너뛰기")
             else:
-                # ★ 출력 중 플래그로 중복 출력 방지
-                if not hasattr(self, '_printing_tracking'):
-                    self._printing_tracking = set()
+                # 출력 시작 전 플래그 설정
+                self._printing_tracking.add(tracking_no)
                 
-                if tracking_no in self._printing_tracking:
-                    self.log_message.emit(f"⚠️ [중복 방지] 송장 {tracking_no} 출력 진행 중 → 건너뛰기")
+                # PDF 출력 전 상태 체크
+                pdf_index_count = len(self.pdf._tracking_index) if hasattr(self.pdf, '_tracking_index') else 0
+                if pdf_index_count == 0:
+                    self.log_message.emit(f"⚠️ [경고] PDF 인덱스가 비어있습니다! PDF 파일을 먼저 로드하세요.")
+                    self.log_message.emit(f"   → '데이터 업로드'에서 송장 라벨 PDF 파일을 선택하세요.")
+                
+                # PDF 출력 (스캔 완료 후)
+                self.log_message.emit(f"[출력] 송장 {tracking_no} PDF 출력 시작 (인덱스: {pdf_index_count}개)")
+                if self.pdf.print_pdf(tracking_no):
+                    self.log_message.emit(f"[성공] PDF 출력 완료: {tracking_no}")
+                    # ★ 출력 완료 후 영구 추적 목록에 추가
+                    self._printed_tracking_nos.add(tracking_no)
                 else:
-                    self._printing_tracking.add(tracking_no)
-                    
-                    # PDF 출력 전 상태 체크
-                    pdf_index_count = len(self.pdf._tracking_index) if hasattr(self.pdf, '_tracking_index') else 0
-                    if pdf_index_count == 0:
-                        self.log_message.emit(f"⚠️ [경고] PDF 인덱스가 비어있습니다! PDF 파일을 먼저 로드하세요.")
-                        self.log_message.emit(f"   → '데이터 업로드'에서 송장 라벨 PDF 파일을 선택하세요.")
-                    
-                    # PDF 출력 (스캔 완료 후)
-                    self.log_message.emit(f"[출력] 송장 {tracking_no} PDF 출력 시작 (인덱스: {pdf_index_count}개)")
-                    if self.pdf.print_pdf(tracking_no):
-                        self.log_message.emit(f"[성공] PDF 출력 완료: {tracking_no}")
-                    else:
-                        self.log_message.emit(f"[오류] PDF 출력 실패: {tracking_no}")
-                        self.log_message.emit(f"   → PDF 파일이 설정되어 있는지 확인하세요.")
-                        self.log_message.emit(f"   → 라벨 프린터가 설정되어 있는지 확인하세요.")
-                    
-                    # 출력 완료 후 플래그 제거
-                    self._printing_tracking.discard(tracking_no)
+                    self.log_message.emit(f"[오류] PDF 출력 실패: {tracking_no}")
+                    self.log_message.emit(f"   → PDF 파일이 설정되어 있는지 확인하세요.")
+                    self.log_message.emit(f"   → 라벨 프린터가 설정되어 있는지 확인하세요.")
+                
+                # 출력 완료 후 진행 중 플래그 제거
+                self._printing_tracking.discard(tracking_no)
             
             # 완료 신호음 🎵
             play_complete_sound()
@@ -385,4 +393,50 @@ class OrderProcessor(QObject):
         self._priority_rules = rules
         # excel_loader에도 전달
         self.excel.set_priority_rules(rules)
+    
+    def get_printed_tracking_nos(self) -> set:
+        """
+        이 세션에서 출력된 송장번호 목록 반환
+        
+        Returns:
+            출력된 송장번호 set
+        """
+        return self._printed_tracking_nos.copy()
+    
+    def set_printed_tracking_nos(self, tracking_nos: set):
+        """
+        출력된 송장번호 목록 설정 (세션 복원 시 사용)
+        
+        Args:
+            tracking_nos: 출력된 송장번호 set
+        """
+        self._printed_tracking_nos = set(tracking_nos) if tracking_nos else set()
+    
+    def add_printed_tracking_no(self, tracking_no: str):
+        """
+        출력된 송장번호 추가 (외부에서 출력 시 사용)
+        
+        Args:
+            tracking_no: 출력된 송장번호
+        """
+        self._printed_tracking_nos.add(tracking_no)
+    
+    def is_already_printed(self, tracking_no: str) -> bool:
+        """
+        해당 송장이 이미 출력되었는지 확인
+        
+        Args:
+            tracking_no: 확인할 송장번호
+        
+        Returns:
+            이미 출력되었으면 True
+        """
+        return tracking_no in self._printed_tracking_nos
+    
+    def clear_printed_tracking_nos(self):
+        """
+        출력된 송장번호 목록 초기화 (새 세션 시작 시)
+        """
+        self._printed_tracking_nos.clear()
+        self._printing_tracking.clear()
 

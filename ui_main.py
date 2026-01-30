@@ -1201,6 +1201,13 @@ class MainWindow(QMainWindow):
     
     def _mark_as_printed(self, tracking_no: str):
         """송장을 출력됨으로 표시"""
+        # 하이픈 제거한 정규화된 형태로 저장
+        clean_tracking = re.sub(r'[-–—\s]', '', tracking_no)
+        
+        # ★ order_processor에도 출력 완료 알림 (세션과 무관하게 중복 출력 방지)
+        if hasattr(self, 'processor'):
+            self.processor.add_printed_tracking_no(clean_tracking)
+        
         session_id = self._shipment_session_id
         if session_id <= 0:
             return
@@ -1208,8 +1215,6 @@ class MainWindow(QMainWindow):
         if session_id not in self._printed_tracking_nos:
             self._printed_tracking_nos[session_id] = set()
         
-        # 하이픈 제거한 정규화된 형태로 저장
-        clean_tracking = re.sub(r'[-–—\s]', '', tracking_no)
         self._printed_tracking_nos[session_id].add(clean_tracking)
         
         # 상태 업데이트
