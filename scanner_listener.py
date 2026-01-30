@@ -44,6 +44,7 @@ class ScannerListener(QObject):
         self._last_emitted_barcode: str = ""
         self._last_emit_time: float = 0
         self._is_paused: bool = False  # 일시 중지 플래그
+        self._resume_time: float = 0  # resume 후 쿨다운 시작 시간
     
     def start(self) -> bool:
         """스캐너 리스닝 시작"""
@@ -138,6 +139,15 @@ class ScannerListener(QObject):
         import time
         current_time = time.time() * 1000  # ms
         
+        # ★ resume 직후 쿨다운 체크 (0.3초간 입력 무시)
+        if hasattr(self, '_resume_time'):
+            elapsed_since_resume = time.time() - self._resume_time
+            if elapsed_since_resume < 0.3:
+                # 쿨다운 중: 버퍼 클리어하고 무시
+                with self._lock:
+                    self._buffer = ""
+                return
+        
         with self._lock:
             key_name = event.name
             
@@ -204,15 +214,23 @@ class ScannerListener(QObject):
     def pause(self):
         """스캐너 일시 중지 (EzAuto 입력 중)"""
         self._is_paused = True
-        self.clear_buffer()
-    
-    def resume(self):
-        """스캐너 재개 (버퍼 및 중복 방지 상태 초기화)"""
+        # ★ pause 시점에 버퍼와 관련 상태 모두 클리어
         with self._lock:
             self._buffer = ""
-            self._last_emitted_barcode = ""
-            self._last_emit_time = 0
             self._last_key_time = 0
+            self._is_fast_input = False
+    
+    def resume(self):
+        """스캐너 재개 (버퍼만 초기화, 중복 방지 상태는 유지)"""
+        import time
+        with self._lock:
+            self._buffer = ""
+            # ★ 중복 방지 상태는 유지 (EzAuto에서 돌아온 직후 같은 바코드 재입력 방지)
+            # self._last_emitted_barcode = ""  # 초기화하지 않음
+            # self._last_emit_time = 0  # 초기화하지 않음
+            self._last_key_time = 0
+            # ★ 쿨다운: resume 직후 0.3초간 입력 무시
+            self._resume_time = time.time()
         self._is_paused = False
     
     @property

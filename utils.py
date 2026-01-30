@@ -191,5 +191,25 @@ def format_log_message(level: str, message: str) -> str:
 def sanitize_barcode(barcode: str) -> str:
     """바코드 문자열 정리"""
     # 앞뒤 공백 제거, 특수문자 정리
-    return barcode.strip().replace('\r', '').replace('\n', '')
+    s = barcode.strip().replace('\r', '').replace('\n', '')
+    # ★ 소숫점 제거 (예: "1234567890.0" → "1234567890")
+    if s.endswith('.0') and s[:-2].replace('-', '').isdigit():
+        s = s[:-2]
+    return s
+
+
+def sanitize_tracking_no(tracking_no) -> str:
+    """송장번호 문자열 정리 (소숫점 제거)"""
+    if tracking_no is None:
+        return ""
+    if isinstance(tracking_no, float):
+        # 소숫점 이하가 0이면 정수로 변환
+        if tracking_no == int(tracking_no):
+            return str(int(tracking_no))
+        return str(tracking_no)
+    s = str(tracking_no).strip()
+    # 문자열이 "1234.0" 형태인 경우도 처리
+    if s.endswith('.0') and s[:-2].replace('-', '').isdigit():
+        return s[:-2]
+    return s
 

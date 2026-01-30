@@ -11,7 +11,7 @@ from models import ScanResult, ScanEvent
 from excel_loader import ExcelLoader
 from ezauto_input import EzAutoInput
 from pdf_printer import PDFPrinter
-from utils import get_timestamp, sanitize_barcode
+from utils import get_timestamp, sanitize_barcode, sanitize_tracking_no
 
 # winsound는 Windows 전용
 try:
@@ -214,7 +214,7 @@ class OrderProcessor(QObject):
         
         # 2. 첫 번째 후보 선택 (qty 가장 작고, tracking_no 오름차순)
         selected = candidates.iloc[0]
-        tracking_no = str(selected['tracking_no'])
+        tracking_no = sanitize_tracking_no(selected['tracking_no'])  # ★ 소숫점 제거
         original_index = selected['index']  # 원본 DataFrame 인덱스
         
         # 3. 이미 사용된 송장인지 확인
@@ -262,12 +262,14 @@ class OrderProcessor(QObject):
             self.ezauto.send_barcode_only(barcode)
             self.log_message.emit(f"[EzAuto] 바코드만 입력: {barcode}")
         
-        # 스캐너 재개 전 대기 (입력 완료 후 안정화)
+        # ★ 스캐너 재개 전 대기 (EzAuto 입력 완료 + 포커스 복귀 안정화)
         import time as time_mod
-        time_mod.sleep(0.5)
+        time_mod.sleep(0.8)  # 0.5 → 0.8초로 늘림
         
         # 스캐너 재개
+        self.log_message.emit("[디버그] 스캐너 재개 준비...")
         self.scanner_resume.emit()
+        self.log_message.emit("[디버그] 스캐너 재개 완료 (0.3초 쿨다운 시작)")
         
         # 7. 남은 수량 계산
         remaining = self.excel.get_group_remaining(tracking_no)
@@ -325,11 +327,12 @@ class OrderProcessor(QObject):
             self.tracking_completed.emit(tracking_no)
             self._current_tracking_no = None
             
-            # 1초 대기 후 스캐너 재개
+            # ★ 1.2초 대기 후 스캐너 재개 (송장 완료 후 충분한 대기)
             import time as time_mod
-            time_mod.sleep(1.0)
+            time_mod.sleep(1.2)
+            self.log_message.emit("[디버그] 송장 완료 후 스캐너 재개 준비...")
             self.scanner_resume.emit()
-            self.log_message.emit("[정보] 다음 송장 스캔 준비 완료")
+            self.log_message.emit("[정보] 다음 송장 스캔 준비 완료 (0.3초 쿨다운 시작)")
             
             event = ScanEvent(
                 timestamp=timestamp,

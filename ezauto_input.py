@@ -283,6 +283,9 @@ class EzAutoInput(QObject):
             self._restore_focus()
             print("[EzAuto] 원래 창으로 복귀 완료")
             
+            # ★ 포커스 복귀 후 안정화 대기 (스캐너 버퍼에 잔여 입력 방지)
+            time.sleep(0.2)
+            
             self.input_success.emit(f"EzAuto 입력 완료: {tracking_no} / {barcode}")
             return True
             
@@ -329,6 +332,8 @@ class EzAutoInput(QObject):
             time.sleep(self._delay_after_tracking)
             
             self._restore_focus()
+            # ★ 포커스 복귀 후 안정화 대기
+            time.sleep(0.2)
             return True
             
         except Exception as e:
@@ -357,6 +362,8 @@ class EzAutoInput(QObject):
             time.sleep(self._delay_after_barcode)
             
             self._restore_focus()
+            # ★ 포커스 복귀 후 안정화 대기
+            time.sleep(0.2)
             return True
             
         except Exception as e:

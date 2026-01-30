@@ -188,8 +188,37 @@ class ExcelLoader(QObject):
                 self.df['used'] = 0
             
             # 데이터 타입 정리
-            self.df['tracking_no'] = self.df['tracking_no'].astype(str)
-            self.df['barcode'] = self.df['barcode'].astype(str)
+            # ★ tracking_no: 숫자일 경우 소숫점 제거 (예: 1234567890.0 → 1234567890)
+            def clean_tracking_no(val):
+                if pd.isna(val):
+                    return ""
+                if isinstance(val, float):
+                    # 소숫점 이하가 0이면 정수로 변환
+                    if val == int(val):
+                        return str(int(val))
+                    return str(val)
+                s = str(val).strip()
+                # 문자열이 "1234.0" 형태인 경우도 처리
+                if s.endswith('.0') and s[:-2].replace('-', '').isdigit():
+                    return s[:-2]
+                return s
+            
+            self.df['tracking_no'] = self.df['tracking_no'].apply(clean_tracking_no)
+            
+            # ★ barcode: 숫자일 경우 소숫점 제거
+            def clean_barcode(val):
+                if pd.isna(val):
+                    return ""
+                if isinstance(val, float):
+                    if val == int(val):
+                        return str(int(val))
+                    return str(val)
+                s = str(val).strip()
+                if s.endswith('.0') and s[:-2].replace('-', '').isdigit():
+                    return s[:-2]
+                return s
+            
+            self.df['barcode'] = self.df['barcode'].apply(clean_barcode)
             self.df['qty'] = self.df['qty'].astype(int)
             self.df['scanned_qty'] = self.df['scanned_qty'].fillna(0).astype(int)
             self.df['used'] = self.df['used'].fillna(0).astype(int)
