@@ -712,51 +712,88 @@ class PDFPrinter(QObject):
                 
                 self.print_success.emit(f"📐 송장 원본 크기: {clip_width:.1f}x{clip_height:.1f}pt")
                 
-                # 고해상도 렌더링 (원본 영역만)
+                # ★ 용지 크기 로드 (settings.json)
+                import json
+                try:
+                    settings_path = Path(__file__).parent / "settings.json"
+                    with open(settings_path, 'r', encoding='utf-8') as f:
+                        settings = json.load(f)
+                    paper_size = settings.get("label_paper_size", {})
+                    paper_width_mm = paper_size.get("width_mm", 110)
+                    paper_height_mm = paper_size.get("height_mm", 168)
+                except:
+                    paper_width_mm = 110
+                    paper_height_mm = 168
+                
+                # 고해상도 렌더링 (원본 영역만, 회전 없이)
                 dpi = 300
                 zoom = dpi / 72
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat, clip=clip_rect, alpha=False)
                 
-                # ★ PIL로 이미지 회전 (PyMuPDF rotate 옵션 대신 직접 회전)
-                # PIL Image로 변환
+                # PIL Image로 변환 (원본, 회전 없음)
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 
-                # PIL 회전 (양수 = 반시계 방향, 음수 = 시계 방향)
-                # 시계 방향 회전으로 설정
-                if label_rotation == 90:
-                    img_rotated = img.rotate(-90, expand=True)  # 시계 90도
-                elif label_rotation == 180:
-                    img_rotated = img.rotate(180, expand=True)
-                elif label_rotation == 270:
-                    img_rotated = img.rotate(-270, expand=True)  # 시계 270도 = 반시계 90도
+                # ★ 1단계: 용지 크기의 흰색 캔버스 생성 (회전 전 기준)
+                # 회전 전 용지 크기 (픽셀)
+                if label_rotation in [90, 270]:
+                    # 90도/270도 회전 시 가로세로가 바뀌므로, 회전 전에는 반대로
+                    canvas_width = int(paper_height_mm * dpi / 25.4)
+                    canvas_height = int(paper_width_mm * dpi / 25.4)
                 else:
-                    img_rotated = img  # 0도: 회전 없음
+                    canvas_width = int(paper_width_mm * dpi / 25.4)
+                    canvas_height = int(paper_height_mm * dpi / 25.4)
                 
-                # 회전된 이미지 크기 (포인트 단위)
-                rotated_width = img_rotated.width / zoom
-                rotated_height = img_rotated.height / zoom
+                # 흰색 캔버스 생성
+                canvas = Image.new('RGB', (canvas_width, canvas_height), (255, 255, 255))
                 
-                self.print_success.emit(f"📐 회전 후 크기: {rotated_width:.1f}x{rotated_height:.1f}pt (회전: {label_rotation}도)")
+                # ★ 2단계: 캔버스에 이미지 배치 (비율 유지, 위쪽 정렬)
+                # 이미지를 캔버스 크기에 맞게 스케일링
+                scale = min(canvas_width / img.width, canvas_height / img.height)
+                new_img_width = int(img.width * scale)
+                new_img_height = int(img.height * scale)
                 
-                # 새 페이지 생성 (회전된 이미지 크기에 맞게)
-                new_page = optimized_doc.new_page(width=rotated_width, height=rotated_height)
+                img_resized = img.resize((new_img_width, new_img_height), Image.LANCZOS)
                 
-                # MediaBox와 CropBox를 동일하게 설정
-                new_page.set_mediabox(fitz.Rect(0, 0, rotated_width, rotated_height))
-                new_page.set_cropbox(fitz.Rect(0, 0, rotated_width, rotated_height))
+                # 이미지를 왼쪽 위에 배치 (여백은 오른쪽/아래쪽)
+                x_pos = 0  # 왼쪽 정렬
+                y_pos = 0  # 위쪽 정렬
                 
-                # 회전된 PIL 이미지를 PNG 바이트로 변환
+                canvas.paste(img_resized, (x_pos, y_pos))
+                
+                empty_space_px = canvas_height - new_img_height
+                empty_space_mm = empty_space_px / dpi * 25.4
+                self.print_success.emit(f"[캔버스] {canvas_width}x{canvas_height}px, 이미지: {new_img_width}x{new_img_height}px, 여백: {empty_space_mm:.1f}mm")
+                
+                # ★ 3단계: 캔버스 전체를 회전 (이미지 + 여백 함께)
+                if label_rotation == 90:
+                    canvas_rotated = canvas.rotate(-90, expand=True)
+                elif label_rotation == 180:
+                    canvas_rotated = canvas.rotate(180, expand=True)
+                elif label_rotation == 270:
+                    canvas_rotated = canvas.rotate(-270, expand=True)
+                else:
+                    canvas_rotated = canvas
+                
+                self.print_success.emit(f"[회전] {label_rotation}도, 최종: {canvas_rotated.width}x{canvas_rotated.height}px")
+                
+                # ★ 4단계: 회전된 캔버스를 PDF로 저장
+                # mm → pt 변환 (1mm = 2.8346pt)
+                paper_width_pt = paper_width_mm * 2.8346
+                paper_height_pt = paper_height_mm * 2.8346
+                
+                new_page = optimized_doc.new_page(width=paper_width_pt, height=paper_height_pt)
+                
+                # 회전된 캔버스를 PNG 바이트로 변환
                 img_bytes = io.BytesIO()
-                img_rotated.save(img_bytes, format='PNG')
+                canvas_rotated.save(img_bytes, format='PNG')
                 img_bytes.seek(0)
                 
-                # 왼쪽 상단(0,0)에서 시작하는 rect에 이미지 삽입
-                target_rect = fitz.Rect(0, 0, rotated_width, rotated_height)
-                self.print_success.emit(f"📍 이미지 배치: 왼쪽상단(0,0) → ({rotated_width:.1f}, {rotated_height:.1f})")
+                # 용지 전체에 배치
+                target_rect = fitz.Rect(0, 0, paper_width_pt, paper_height_pt)
                 
-                # rotate=0 (이미 PIL로 회전됨), keep_proportion=False로 정확한 위치에 삽입
-                new_page.insert_image(target_rect, stream=img_bytes.getvalue(), keep_proportion=False, overlay=True)
+                # 이미지 삽입
+                new_page.insert_image(target_rect, stream=img_bytes.getvalue(), keep_proportion=True, overlay=True)
             
             temp_path = self._temp_dir / f"{clean_tracking_no}.pdf"
             if temp_path.exists():

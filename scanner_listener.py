@@ -62,8 +62,14 @@ class ScannerListener(QObject):
             self._is_running = True
             self._buffer = ""
             
+            # ★ 이전 훅 제거 (중복 방지)
+            try:
+                keyboard.unhook_all()
+            except:
+                pass
+            
             # 키보드 훅 등록
-            keyboard.on_press(self._on_key_press)
+            self._hook = keyboard.on_press(self._on_key_press)
             
             self.status_changed.emit("✓ 스캐너 리스닝 시작됨")
             return True

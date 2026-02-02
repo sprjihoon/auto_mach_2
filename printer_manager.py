@@ -480,13 +480,20 @@ def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) ->
             hdc = win32ui.CreateDC()
             hdc.CreatePrinterDC(printer_name)
             
-            # 프린터 인쇄 가능 영역 (픽셀)
-            printer_width = hdc.GetDeviceCaps(win32con.HORZRES)
-            printer_height = hdc.GetDeviceCaps(win32con.VERTRES)
+            # 프린터 DPI
             printer_dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX)
             printer_dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY)
             
-            # ★ 프린터 물리적 오프셋 (비인쇄 영역) - 왼쪽 상단 정렬을 위해 필요
+            # ★ 실제 용지 크기 (픽셀) - 여백 포함 전체 용지
+            try:
+                paper_width = hdc.GetDeviceCaps(win32con.PHYSICALWIDTH)
+                paper_height = hdc.GetDeviceCaps(win32con.PHYSICALHEIGHT)
+            except:
+                # 실제 용지 크기를 못 가져오면 인쇄 가능 영역 사용
+                paper_width = hdc.GetDeviceCaps(win32con.HORZRES)
+                paper_height = hdc.GetDeviceCaps(win32con.VERTRES)
+            
+            # ★ 물리적 오프셋 (비인쇄 영역) - 왼쪽 상단 정렬을 위해 필요
             try:
                 offset_x = hdc.GetDeviceCaps(win32con.PHYSICALOFFSETX)
                 offset_y = hdc.GetDeviceCaps(win32con.PHYSICALOFFSETY)
@@ -494,7 +501,18 @@ def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) ->
                 offset_x = 0
                 offset_y = 0
             
-            msg = f"프린터 영역: {printer_width}x{printer_height}, DPI: {printer_dpi_x}x{printer_dpi_y}, 오프셋: ({offset_x}, {offset_y})"
+            # 인쇄 가능 영역 (참고용)
+            printable_width = hdc.GetDeviceCaps(win32con.HORZRES)
+            printable_height = hdc.GetDeviceCaps(win32con.VERTRES)
+            
+            # 용지 크기를 mm로도 계산 (참고용)
+            paper_width_mm = paper_width / printer_dpi_x * 25.4
+            paper_height_mm = paper_height / printer_dpi_y * 25.4
+            
+            msg = f"[용지] {paper_width}x{paper_height}px ({paper_width_mm:.1f}x{paper_height_mm:.1f}mm)"
+            print(msg)
+            write_log(msg)
+            msg = f"[인쇄가능] {printable_width}x{printable_height}px, DPI: {printer_dpi_x}x{printer_dpi_y}, offset: ({offset_x}, {offset_y})"
             print(msg)
             write_log(msg)
             
@@ -509,16 +527,22 @@ def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) ->
             
             print(f"이미지: {img.width}x{img.height} → ", end="")
             
-            # 이미지를 프린터 영역에 맞게 스케일링
-            scale = min(printer_width / img.width, printer_height / img.height)
+            # ★ 이미지를 실제 용지 크기에 맞춤 (비율 유지, PDF가 이미 용지 크기에 맞게 생성됨)
+            scale = min(paper_width / img.width, paper_height / img.height)
             final_width = int(img.width * scale)
             final_height = int(img.height * scale)
             
-            msg = f"이미지: {img.width}x{img.height} → {final_width}x{final_height} (scale: {scale:.2f})"
-            print(f"{final_width}x{final_height} (scale: {scale:.2f})")
+            # 이미지 크기를 mm로도 계산
+            img_width_mm = img.width / printer_dpi_x * 25.4
+            img_height_mm = img.height / printer_dpi_y * 25.4
+            final_width_mm = final_width / printer_dpi_x * 25.4
+            final_height_mm = final_height / printer_dpi_y * 25.4
+            
+            msg = f"[이미지] {img.width}x{img.height}px ({img_width_mm:.1f}x{img_height_mm:.1f}mm) -> {final_width}x{final_height}px ({final_width_mm:.1f}x{final_height_mm:.1f}mm) (scale: {scale:.3f})"
+            print(f"{final_width}x{final_height} (scale: {scale:.3f})")
             write_log(msg)
             
-            # 이미지를 최종 크기로 리사이즈
+            # 이미지를 용지 크기에 맞게 리사이즈 (비율 유지)
             img_resized = img.resize((final_width, final_height), Image.LANCZOS)
             
             # 출력
@@ -530,11 +554,13 @@ def print_pdf_with_printer(pdf_path: str, printer_name: Optional[str] = None) ->
             dib = ImageWin.Dib(img_resized)
             write_log("이미지 그리기...")
             
-            # ★ 물리적 오프셋을 빼서 실제 용지의 왼쪽 상단(0,0)에서 시작
-            # 오프셋을 빼면 인쇄 가능 영역 바깥으로 나가서 용지 끝에서 시작
+            # ★ PDF가 이미 용지 크기에 맞게 만들어졌으므로, 위치 조정 없이 (0,0)에서 시작
+            # 물리적 오프셋만 보정하여 용지 왼쪽 상단에서 시작
             draw_x = -offset_x
             draw_y = -offset_y
-            write_log(f"그리기 좌표: ({draw_x}, {draw_y}) → ({draw_x + final_width}, {draw_y + final_height})")
+            
+            write_log(f"용지: {paper_width}x{paper_height}, 이미지: {final_width}x{final_height}")
+            write_log(f"1:1 출력: ({draw_x}, {draw_y}) -> ({draw_x + final_width}, {draw_y + final_height})")
             dib.draw(hdc.GetHandleOutput(), (draw_x, draw_y, draw_x + final_width, draw_y + final_height))
             
             write_log("EndPage 호출...")

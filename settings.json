@@ -1,11 +1,33 @@
 {
-  "label_printer": null,
-  "a4_printer": null,
+  "label_printer": "HPRT SL43",
+  "a4_printer": "OneNote for Windows 10",
   "bin_settings": {
     "max_qty_per_bin": 50,
     "min_qty_threshold": 10,
     "max_sku_per_shared_bin": 2,
     "dedicated_qty_threshold": 30
   },
-  "label_rotation": 270
+  "label_rotation": 270,
+  "label_paper_size": {
+    "width_mm": 110,
+    "height_mm": 168
+  },
+  "esp32_settings": {
+    "host": "0.0.0.0",
+    "port": 8765,
+    "enabled": true
+  },
+  "ezauto_settings": {
+    "window_title": "이지오토",
+    "enabled": true,
+    "use_clipboard": false,
+    "delay_after_tracking": 0.8,
+    "delay_after_barcode": 0.3
+  },
+  "app_settings": {
+    "first_run": false,
+    "version": "1.0.0",
+    "last_excel_path": null,
+    "last_pdf_path": null
+  }
 }

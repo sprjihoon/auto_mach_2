@@ -1592,12 +1592,13 @@ class MainWindow(QMainWindow):
         self.fp_server_status.setMinimumWidth(120)
         server_layout.addWidget(self.fp_server_status)
         
-        self.fp_server_btn = QPushButton("서버 시작")
-        self.fp_server_btn.clicked.connect(self._on_fp_toggle_server)
-        server_layout.addWidget(self.fp_server_btn)
-        
         self.fp_device_count = QLabel("연결: 0대")
         server_layout.addWidget(self.fp_device_count)
+        
+        self.fp_esp32_settings_btn = QPushButton("⚙️ ESP32 설정")
+        self.fp_esp32_settings_btn.setToolTip("ESP32 탭에서 서버 시작/중지")
+        self.fp_esp32_settings_btn.clicked.connect(self._go_to_esp32_tab)
+        server_layout.addWidget(self.fp_esp32_settings_btn)
         
         top_layout.addWidget(server_group)
         
@@ -2275,7 +2276,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'fp_server_status'):
             self.fp_server_status.setText(f"🟢 실행중 (:{port})")
             self.fp_server_status.setStyleSheet("color: green;")
-            self.fp_server_btn.setText("서버 중지")
     
     @Slot()
     def _on_esp32_server_stopped(self):
@@ -2294,7 +2294,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'fp_server_status'):
             self.fp_server_status.setText("⚫ 중지됨")
             self.fp_server_status.setStyleSheet("color: gray;")
-            self.fp_server_btn.setText("서버 시작")
     
     def _create_settings_tab(self) -> QWidget:
         """설정 탭 생성 - 데이터 업로드, 프린터 설정, BIN 설정, 저장 위치 등"""
@@ -2798,6 +2797,18 @@ class MainWindow(QMainWindow):
             self.settings_label_pdf_path.setText(file_path)
             # 출고 탭에도 동기화
             self.pdf_path_edit.setText(file_path)
+            
+            # ★ PDF 인덱스 생성 (송장번호 매핑)
+            self._add_log("PDF 스캔 중...")
+            self.pdf_printer.set_pdf_file(file_path)
+            
+            # 엑셀에서 송장번호 목록 가져오기
+            excel_tracking_numbers = None
+            if self.excel_loader.df is not None:
+                excel_tracking_numbers = self.excel_loader.df['tracking_no'].astype(str).tolist()
+            
+            count = self.pdf_printer.build_tracking_index(excel_tracking_numbers)
+            self._add_log(f"✓ PDF 스캔 완료: {count}개 송장번호 발견")
     
     def _on_settings_browse_order_pdf(self):
         """설정 탭 - 주문서 PDF 파일 선택"""
@@ -4021,28 +4032,26 @@ class MainWindow(QMainWindow):
             self.fp_scan_history_table.setRowCount(0)
             self._add_fp_log("[히스토리] 초기화됨")
     
-    @Slot()
-    def _on_fp_toggle_server(self):
-        """ESP32 서버 시작/중지 (ESP32 탭 함수 호출)"""
-        if self.esp32_transport.is_running:
-            self._on_esp32_stop_server()
-        else:
-            self._on_esp32_toggle_server()
+    def _go_to_esp32_tab(self):
+        """ESP32 설정 탭으로 이동"""
+        # ESP32 탭 인덱스 찾기 (탭 순서가 바뀔 수 있으므로)
+        for i in range(self.tab_widget.count()):
+            if "ESP32" in self.tab_widget.tabText(i):
+                self.tab_widget.setCurrentIndex(i)
+                break
     
     @Slot(int)
     def _on_fp_server_started(self, port: int):
-        """서버 시작 완료"""
+        """서버 시작 완료 - 상태 표시만"""
         self.fp_server_status.setText(f"🟢 실행중 (:{port})")
         self.fp_server_status.setStyleSheet("color: green;")
-        self.fp_server_btn.setText("서버 중지")
         self._add_fp_log(f"ESP32 WebSocket 서버 시작: 포트 {port}")
     
     @Slot()
     def _on_fp_server_stopped(self):
-        """서버 중지"""
+        """서버 중지 - 상태 표시만"""
         self.fp_server_status.setText("⚫ 중지됨")
         self.fp_server_status.setStyleSheet("color: gray;")
-        self.fp_server_btn.setText("서버 시작")
         self._add_fp_log("ESP32 서버 중지됨")
     
     @Slot(str)
@@ -5549,6 +5558,14 @@ class MainWindow(QMainWindow):
         
         # 탭 전환 시그널 - 전체피킹 탭 정보 업데이트
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
+        
+        # Processor 시그널 (여기서 한 번만 연결)
+        self.processor.scan_processed.connect(self._on_scan_processed)
+        self.processor.tracking_completed.connect(self._on_tracking_completed)
+        self.processor.ui_update_required.connect(self._update_tables)
+        self.processor.log_message.connect(self._add_log)
+        self.processor.scanner_pause.connect(self.scanner.pause)
+        self.processor.scanner_resume.connect(self.scanner.resume)
     
     @Slot(int)
     def _on_pdf_indexed(self, count: int):
@@ -5590,14 +5607,6 @@ class MainWindow(QMainWindow):
         # 재출력 탭 (인덱스 3)
         elif index == 3:
             QTimer.singleShot(100, lambda: self.reprint_input.setFocus())
-        
-        # Processor 시그널
-        self.processor.scan_processed.connect(self._on_scan_processed)
-        self.processor.tracking_completed.connect(self._on_tracking_completed)
-        self.processor.ui_update_required.connect(self._update_tables)
-        self.processor.log_message.connect(self._add_log)
-        self.processor.scanner_pause.connect(self.scanner.pause)
-        self.processor.scanner_resume.connect(self.scanner.resume)
     
     def _handle_esp32_mode_switch(self, tab_index: int):
         """탭 전환 시 ESP32 모드 전환 처리"""
@@ -6523,10 +6532,19 @@ class MainWindow(QMainWindow):
             from reportlab.lib.pagesizes import landscape
             from reportlab.lib.units import mm
             from datetime import datetime
+            import json
             
-            # 라벨 크기 (100mm x 70mm 가로형)
-            label_width = 100 * mm
-            label_height = 70 * mm
+            # 라벨 크기 (settings.json에서 로드, 기본값: 110x168mm)
+            try:
+                settings_path = Path(__file__).parent / "settings.json"
+                with open(settings_path, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                paper_size = settings.get("label_paper_size", {})
+                label_width = paper_size.get("width_mm", 110) * mm
+                label_height = paper_size.get("height_mm", 168) * mm
+            except:
+                label_width = 110 * mm
+                label_height = 168 * mm
             
             c = canvas.Canvas(str(test_pdf_path), pagesize=(label_width, label_height))
             
@@ -6590,40 +6608,73 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "경고", f"테스트 PDF 생성 실패: {str(e)}")
             return
         
-        # PDF 생성 후 회전 적용하여 출력
+        # PDF 생성 후 회전 적용하여 출력 (실제 송장 출력과 동일한 PIL 방식)
         try:
             import fitz
+            from PIL import Image
+            import io
             
             # 원본 PDF 열기
             doc = fitz.open(str(test_pdf_path))
             page = doc[0]
             
-            # 페이지 크기
-            page_rect = page.rect
-            page_width = page_rect.width
-            page_height = page_rect.height
+            # 용지 크기 (mm)
+            paper_width_mm = label_width / mm
+            paper_height_mm = label_height / mm
             
-            # 회전 후 크기 계산
-            if rotation in [90, 270]:
-                rotated_width = page_height
-                rotated_height = page_width
-            else:
-                rotated_width = page_width
-                rotated_height = page_height
-            
-            # 새 문서 생성 (회전 적용)
-            rotated_doc = fitz.open()
-            new_page = rotated_doc.new_page(width=rotated_width, height=rotated_height)
-            
-            # 고해상도 렌더링
+            # 고해상도 렌더링 (원본, 회전 없이)
             dpi = 300
             zoom = dpi / 72
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, alpha=False)
             
-            # 회전 적용하여 삽입
-            target_rect = fitz.Rect(0, 0, rotated_width, rotated_height)
-            new_page.insert_image(target_rect, pixmap=pix, rotate=rotation, keep_proportion=True, overlay=True)
+            # PIL Image로 변환 (원본)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            
+            # ★ 1단계: 용지 크기의 흰색 캔버스 생성 (회전 전 기준)
+            if rotation in [90, 270]:
+                canvas_width = int(paper_height_mm * dpi / 25.4)
+                canvas_height = int(paper_width_mm * dpi / 25.4)
+            else:
+                canvas_width = int(paper_width_mm * dpi / 25.4)
+                canvas_height = int(paper_height_mm * dpi / 25.4)
+            
+            canvas = Image.new('RGB', (canvas_width, canvas_height), (255, 255, 255))
+            
+            # ★ 2단계: 캔버스에 이미지 배치 (비율 유지, 위쪽 정렬)
+            scale = min(canvas_width / img.width, canvas_height / img.height)
+            new_img_width = int(img.width * scale)
+            new_img_height = int(img.height * scale)
+            
+            img_resized = img.resize((new_img_width, new_img_height), Image.LANCZOS)
+            
+            x_pos = 0  # 왼쪽 정렬
+            y_pos = 0  # 위쪽 정렬
+            canvas.paste(img_resized, (x_pos, y_pos))
+            
+            # ★ 3단계: 캔버스 전체를 회전 (이미지 + 여백 함께)
+            if rotation == 90:
+                canvas_rotated = canvas.rotate(-90, expand=True)
+            elif rotation == 180:
+                canvas_rotated = canvas.rotate(180, expand=True)
+            elif rotation == 270:
+                canvas_rotated = canvas.rotate(-270, expand=True)
+            else:
+                canvas_rotated = canvas
+            
+            # ★ 4단계: 회전된 캔버스를 PDF로 저장
+            paper_width_pt = paper_width_mm * 2.8346
+            paper_height_pt = paper_height_mm * 2.8346
+            
+            rotated_doc = fitz.open()
+            new_page = rotated_doc.new_page(width=paper_width_pt, height=paper_height_pt)
+            
+            img_bytes = io.BytesIO()
+            canvas_rotated.save(img_bytes, format='PNG')
+            img_bytes.seek(0)
+            
+            target_rect = fitz.Rect(0, 0, paper_width_pt, paper_height_pt)
+            new_page.insert_image(target_rect, stream=img_bytes.getvalue(), keep_proportion=True, overlay=True)
             
             # 회전된 PDF 저장
             rotated_pdf_path = test_pdf_path.parent / f"test_label_{rotation}_rotated.pdf"
