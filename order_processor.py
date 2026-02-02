@@ -2,7 +2,7 @@
 주문 처리 로직
 qty/scanned_qty 처리, 우선순위 정렬 로직
 """
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Set
 from PySide6.QtCore import QObject, Signal
 import pandas as pd
 import threading
@@ -12,6 +12,17 @@ from excel_loader import ExcelLoader
 from ezauto_input import EzAutoInput
 from pdf_printer import PDFPrinter
 from utils import get_timestamp, sanitize_barcode, sanitize_tracking_no
+
+# ESP32 연동 (선택적)
+try:
+    from device_registry import DeviceRegistry
+    from esp32_transport import Esp32Transport, DisplayCommand
+    ESP32_AVAILABLE = True
+except ImportError:
+    ESP32_AVAILABLE = False
+    DeviceRegistry = None
+    Esp32Transport = None
+    DisplayCommand = None
 
 # winsound는 Windows 전용
 try:
@@ -96,6 +107,16 @@ class OrderProcessor(QObject):
         # ★ 세션 내 출력 완료된 송장 추적 (중복 출력 방지)
         self._printed_tracking_nos: set = set()
         self._printing_tracking: set = set()  # 출력 진행 중인 송장
+        
+        # ★ ESP32 연동 (출고 시 합포장 빈 표시)
+        self._device_registry = None
+        self._esp32_transport = None
+        self._bin_manager = None
+        self._esp32_enabled: bool = False
+        self._active_bins: Set[str] = set()  # 현재 표시 중인 빈 목록
+        
+        # 출고 모드 전용 색상
+        self.SHIPMENT_COLOR = "red"
     
     @property
     def current_tracking_no(self) -> Optional[str]:
@@ -262,10 +283,16 @@ class OrderProcessor(QObject):
             self._current_tracking_no = tracking_no
             self.ezauto.send_input(tracking_no, barcode)
             self.log_message.emit(f"[EzAuto] 송장번호 + 바코드 입력: {tracking_no} / {barcode}")
+            
+            # ★ ESP32: 새 송장 로드 시 남은 제품들의 빈 표시
+            self._send_remaining_bins_display(tracking_no, exclude_barcode=barcode)
         else:
             # 같은 송장: 바코드만 입력
             self.ezauto.send_barcode_only(barcode)
             self.log_message.emit(f"[EzAuto] 바코드만 입력: {barcode}")
+            
+            # ★ ESP32: 스캔 후 빈 표시 업데이트
+            self._update_bin_display_after_scan(tracking_no, barcode)
         
         # ★ 스캐너 재개 전 대기 (EzAuto 입력 완료 + 포커스 복귀 안정화)
         import time as time_mod
@@ -320,6 +347,9 @@ class OrderProcessor(QObject):
                 
                 # 출력 완료 후 진행 중 플래그 제거
                 self._printing_tracking.discard(tracking_no)
+            
+            # ★ ESP32: 송장 완료 시 모든 빈 표시 끄기
+            self._clear_all_bin_displays()
             
             # 완료 신호음 🎵
             play_complete_sound()
@@ -380,6 +410,9 @@ class OrderProcessor(QObject):
     
     def reset_current_tracking(self):
         """현재 tracking_no 초기화"""
+        # ★ ESP32: 빈 표시 끄기
+        self._clear_all_bin_displays()
+        
         self._current_tracking_no = None
         self.ui_update_required.emit()
     
@@ -439,4 +472,202 @@ class OrderProcessor(QObject):
         """
         self._printed_tracking_nos.clear()
         self._printing_tracking.clear()
+    
+    # ===== ESP32 연동 메서드 (출고 시 합포장 빈 표시) =====
+    
+    def set_esp32(self, device_registry=None, esp32_transport=None, bin_manager=None):
+        """
+        ESP32 연동 설정 (출고 시 합포장 빈 위치 + 수량 표시)
+        
+        Args:
+            device_registry: DeviceRegistry 객체
+            esp32_transport: Esp32Transport 객체
+            bin_manager: BinManager 객체
+        """
+        self._device_registry = device_registry
+        self._esp32_transport = esp32_transport
+        self._bin_manager = bin_manager
+        
+        # ESP32 연동 활성화 여부 체크
+        self._esp32_enabled = (
+            ESP32_AVAILABLE and 
+            device_registry is not None and 
+            esp32_transport is not None and 
+            bin_manager is not None
+        )
+        
+        if self._esp32_enabled:
+            self.log_message.emit("[ESP32] 출고 모드 ESP32 연동 활성화됨")
+        else:
+            self.log_message.emit("[ESP32] 출고 모드 ESP32 연동 비활성화")
+    
+    def _send_remaining_bins_display(self, tracking_no: str, exclude_barcode: str = None):
+        """
+        현재 송장의 아직 스캔하지 않은 제품들의 빈에 수량 표시
+        
+        Args:
+            tracking_no: 송장번호
+            exclude_barcode: 방금 스캔한 바코드 (표시 제외)
+        """
+        if not self._esp32_enabled:
+            return
+        
+        if not self._esp32_transport.is_running:
+            return
+        
+        # 현재 표시 중인 빈 초기화
+        self._clear_all_bin_displays()
+        
+        # 해당 송장의 모든 항목 조회
+        items = self.excel.get_tracking_group(tracking_no)
+        if items.empty:
+            return
+        
+        # 빈별 남은 수량 집계
+        bin_qty_map: Dict[str, int] = {}
+        
+        for _, row in items.iterrows():
+            barcode = str(row['barcode']).strip()
+            qty = int(row['qty'])
+            scanned_qty = int(row.get('scanned_qty', 0))
+            remaining = qty - scanned_qty
+            
+            # 방금 스캔한 바코드는 제외 (이미 처리됨)
+            if exclude_barcode and barcode.upper() == exclude_barcode.upper():
+                # 스캔 후 남은 수량 계산 (scanned_qty가 아직 업데이트 안됐을 수 있음)
+                remaining = remaining - 1
+            
+            if remaining <= 0:
+                continue
+            
+            # 빈 조회
+            bin_id = self._bin_manager.get_sku_bin(barcode)
+            if bin_id == "BIN 미지정":
+                continue
+            
+            # 빈별 수량 합산
+            if bin_id not in bin_qty_map:
+                bin_qty_map[bin_id] = 0
+            bin_qty_map[bin_id] += remaining
+        
+        # 각 빈에 표시 전송
+        for bin_id, qty in bin_qty_map.items():
+            if qty <= 0:
+                continue
+            
+            device_id = self._device_registry.get_device_id_by_bin(bin_id)
+            if not device_id:
+                self.log_message.emit(f"[ESP32] BIN {bin_id}에 연결된 장치 없음")
+                continue
+            
+            # 디스플레이 명령 전송
+            cmd = DisplayCommand(
+                mode="shipment",
+                bin_id=bin_id,
+                color=self.SHIPMENT_COLOR,
+                qty=qty,
+                blink=False
+            )
+            
+            if self._esp32_transport.send_display(device_id, cmd):
+                self._active_bins.add(bin_id)
+                self.log_message.emit(f"[ESP32] {bin_id} 표시: {qty}개 (빨간색)")
+            else:
+                self.log_message.emit(f"[ESP32] {bin_id} 전송 실패")
+    
+    def _update_bin_display_after_scan(self, tracking_no: str, scanned_barcode: str):
+        """
+        스캔 후 빈 표시 업데이트 (해당 제품의 빈만 업데이트)
+        
+        Args:
+            tracking_no: 송장번호
+            scanned_barcode: 스캔된 바코드
+        """
+        if not self._esp32_enabled:
+            return
+        
+        if not self._esp32_transport.is_running:
+            return
+        
+        # 스캔된 바코드의 빈 조회
+        bin_id = self._bin_manager.get_sku_bin(scanned_barcode)
+        if bin_id == "BIN 미지정":
+            return
+        
+        # 해당 송장에서 이 빈에 속한 제품들의 남은 수량 계산
+        items = self.excel.get_tracking_group(tracking_no)
+        if items.empty:
+            return
+        
+        remaining_qty = 0
+        for _, row in items.iterrows():
+            barcode = str(row['barcode']).strip()
+            item_bin = self._bin_manager.get_sku_bin(barcode)
+            
+            if item_bin != bin_id:
+                continue
+            
+            qty = int(row['qty'])
+            scanned_qty = int(row.get('scanned_qty', 0))
+            remaining = qty - scanned_qty
+            
+            if remaining > 0:
+                remaining_qty += remaining
+        
+        # 남은 수량이 있으면 업데이트, 없으면 끄기
+        device_id = self._device_registry.get_device_id_by_bin(bin_id)
+        if not device_id:
+            return
+        
+        if remaining_qty > 0:
+            # 수량 업데이트
+            cmd = DisplayCommand(
+                mode="shipment",
+                bin_id=bin_id,
+                color=self.SHIPMENT_COLOR,
+                qty=remaining_qty,
+                blink=False
+            )
+            self._esp32_transport.send_display(device_id, cmd)
+            self.log_message.emit(f"[ESP32] {bin_id} 업데이트: {remaining_qty}개")
+        else:
+            # 해당 빈 끄기
+            self._clear_bin_display(bin_id)
+    
+    def _clear_bin_display(self, bin_id: str):
+        """
+        특정 빈의 표시 끄기
+        
+        Args:
+            bin_id: 빈 ID
+        """
+        if not self._esp32_enabled:
+            return
+        
+        if bin_id not in self._active_bins:
+            return
+        
+        device_id = self._device_registry.get_device_id_by_bin(bin_id)
+        if device_id:
+            self._esp32_transport.send_off(device_id, bin_id)
+            self.log_message.emit(f"[ESP32] {bin_id} OFF")
+        
+        self._active_bins.discard(bin_id)
+    
+    def _clear_all_bin_displays(self):
+        """
+        모든 활성 빈의 표시 끄기
+        """
+        if not self._esp32_enabled:
+            return
+        
+        for bin_id in list(self._active_bins):
+            device_id = self._device_registry.get_device_id_by_bin(bin_id)
+            if device_id:
+                self._esp32_transport.send_off(device_id, bin_id)
+        
+        if self._active_bins:
+            self.log_message.emit(f"[ESP32] 모든 빈 표시 OFF ({len(self._active_bins)}개)")
+        
+        self._active_bins.clear()
 

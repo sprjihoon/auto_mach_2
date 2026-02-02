@@ -122,7 +122,7 @@ class FullPickEngine(QObject):
         
         # 의존성
         self._device_registry = device_registry
-        self._esp32_transport = esp32_transport
+        self._esp32_transport = None  # set_esp32_transport에서 설정
         
         # 현재 세션
         self._current_session: Optional[SkuPickSession] = None
@@ -136,6 +136,10 @@ class FullPickEngine(QObject):
         
         # ESP32 연동 활성화 여부
         self._lcd_enabled: bool = True
+        
+        # ESP32 transport 설정 (시그널 연결 포함)
+        if esp32_transport:
+            self.set_esp32_transport(esp32_transport)
     
     @property
     def state(self) -> FullPickState:

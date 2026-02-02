@@ -28,6 +28,28 @@ else:
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 
+def check_firewall_on_first_run():
+    """첫 실행 시 방화벽 설정 확인 및 설정"""
+    # 설정 파일에서 방화벽 확인 여부 체크
+    firewall_checked_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".firewall_configured")
+    if getattr(sys, 'frozen', False):
+        firewall_checked_file = os.path.join(os.path.dirname(sys.executable), ".firewall_configured")
+    
+    # 이미 확인한 경우 스킵
+    if os.path.exists(firewall_checked_file):
+        return
+    
+    try:
+        from firewall_setup import ensure_firewall_configured
+        ensure_firewall_configured(show_dialog=True)
+        
+        # 확인 완료 표시
+        with open(firewall_checked_file, "w") as f:
+            f.write("1")
+    except Exception as e:
+        print(f"[Main] 방화벽 설정 확인 오류: {e}")
+
+
 def update_splash(text):
     """PyInstaller 부팅 스플래시 텍스트 업데이트"""
     try:
@@ -49,6 +71,11 @@ def close_splash():
 def main():
     """메인 함수"""
     # 스플래시 업데이트 - 퍼센트로 표시
+    update_splash("10%")
+    
+    # 첫 실행 시 방화벽 설정 확인
+    check_firewall_on_first_run()
+    
     update_splash("20%")
     
     from PySide6.QtWidgets import QApplication

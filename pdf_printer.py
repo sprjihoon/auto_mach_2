@@ -1346,8 +1346,10 @@ def create_picking_list_pdf(df, output_path: str, sku_bin_map: dict = None) -> b
         
     except ImportError as e:
         print(f"[피킹리스트] reportlab 패키지가 필요합니다: {e}")
-        return False
+        raise Exception(f"reportlab 패키지가 필요합니다: {e}")
     except Exception as e:
+        import traceback
         print(f"[피킹리스트] PDF 생성 오류: {e}")
-        return False
+        traceback.print_exc()
+        raise Exception(f"PDF 생성 오류: {e}")
 

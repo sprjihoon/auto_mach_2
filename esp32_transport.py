@@ -14,7 +14,9 @@ PC → ESP32:
 """
 import asyncio
 import json
+import socket
 import threading
+import time
 from typing import Optional, Callable, Dict, Set
 from dataclasses import dataclass
 from PySide6.QtCore import QObject, Signal
@@ -53,6 +55,8 @@ class Esp32Transport(QObject):
     server_stopped = Signal()
     message_received = Signal(str, dict)  # device_id, message
     error_occurred = Signal(str)        # error message
+    device_version = Signal(str, str, str)  # device_id, firmware_version, ip (버전 정보)
+    ota_progress = Signal(str, int)     # device_id, progress (OTA 진행률)
     
     # 기본 설정
     DEFAULT_HOST = "0.0.0.0"
@@ -88,6 +92,11 @@ class Esp32Transport(QObject):
         
         # 메시지 핸들러
         self._message_handlers: Dict[str, Callable] = {}
+        
+        # UDP 자동 발견 브로드캐스트
+        self._discovery_port = 8764
+        self._discovery_thread: Optional[threading.Thread] = None
+        self._discovery_running = False
         
         # 콜백
         self._on_hello_callback: Optional[Callable] = None
@@ -144,6 +153,10 @@ class Esp32Transport(QObject):
             # 서버 시작
             self._event_loop.run_until_complete(self._start_server())
             self._running = True
+            
+            # ★ UDP 자동 발견 브로드캐스트 시작
+            self.start_discovery_broadcast()
+            
             self.server_started.emit(self._port)
             
             # 이벤트 루프 실행
@@ -192,11 +205,15 @@ class Esp32Transport(QObject):
                     if msg_type == "hello":
                         # 장치 연결 (hello)
                         device_id = data.get("device_id", "unknown")
+                        firmware_version = data.get("firmware_version", "unknown")
+                        device_ip = data.get("ip", "unknown")
+                        
                         self._connections[device_id] = websocket
                         self._websocket_to_device[websocket] = device_id
                         
-                        print(f"[ESP32Transport] 장치 연결: {device_id}")
+                        print(f"[ESP32Transport] 장치 연결: {device_id} (v{firmware_version}, {device_ip})")
                         self.device_hello.emit(device_id)
+                        self.device_version.emit(device_id, firmware_version, device_ip)
                         
                         if self._on_hello_callback:
                             self._on_hello_callback(device_id, websocket)
@@ -240,6 +257,9 @@ class Esp32Transport(QObject):
             return
         
         try:
+            # ★ UDP 자동 발견 브로드캐스트 중지
+            self.stop_discovery_broadcast()
+            
             if self._server:
                 self._server.close()
             
@@ -400,3 +420,108 @@ class Esp32Transport(QObject):
     def is_device_connected(self, device_id: str) -> bool:
         """장치 연결 상태 확인"""
         return device_id in self._connections
+    
+    # ===== OTA 업데이트 관련 =====
+    
+    def send_ota_update(self, device_id: str, firmware_url: str) -> bool:
+        """
+        OTA 업데이트 명령 전송
+        
+        Args:
+            device_id: 장치 ID
+            firmware_url: 펌웨어 다운로드 URL
+        """
+        return self.send_to_device(device_id, {
+            "type": "ota",
+            "url": firmware_url
+        })
+    
+    def send_ota_to_all(self, firmware_url: str) -> int:
+        """
+        모든 연결된 장치에 OTA 업데이트 전송
+        
+        Returns:
+            전송 성공한 장치 수
+        """
+        success_count = 0
+        for device_id in list(self._connections.keys()):
+            if self.send_ota_update(device_id, firmware_url):
+                success_count += 1
+        return success_count
+    
+    def send_version_request(self, device_id: str) -> bool:
+        """버전 정보 요청"""
+        return self.send_to_device(device_id, {"type": "version"})
+    
+    def send_reboot(self, device_id: str) -> bool:
+        """장치 재부팅 명령"""
+        return self.send_to_device(device_id, {"type": "reboot"})
+    
+    def send_reboot_all(self) -> int:
+        """모든 장치 재부팅"""
+        success_count = 0
+        for device_id in list(self._connections.keys()):
+            if self.send_reboot(device_id):
+                success_count += 1
+        return success_count
+    
+    # ===== UDP 자동 발견 브로드캐스트 =====
+    
+    def _get_local_ip(self) -> str:
+        """로컬 IP 주소 가져오기"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except:
+            return "127.0.0.1"
+    
+    def _discovery_broadcast_loop(self):
+        """UDP 브로드캐스트 루프 (별도 스레드)"""
+        local_ip = self._get_local_ip()
+        message = f"AUTOMACH:{local_ip}:{self._port}"
+        
+        print(f"[Discovery] Broadcasting: {message}")
+        
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(1.0)
+        
+        try:
+            while self._discovery_running:
+                try:
+                    # 브로드캐스트 전송
+                    sock.sendto(message.encode(), ('<broadcast>', self._discovery_port))
+                except Exception as e:
+                    pass
+                
+                # 2초 간격으로 브로드캐스트
+                for _ in range(20):  # 2초 = 0.1초 * 20
+                    if not self._discovery_running:
+                        break
+                    time.sleep(0.1)
+        finally:
+            sock.close()
+            print("[Discovery] Broadcast stopped")
+    
+    def start_discovery_broadcast(self):
+        """UDP 자동 발견 브로드캐스트 시작"""
+        if self._discovery_running:
+            return
+        
+        self._discovery_running = True
+        self._discovery_thread = threading.Thread(
+            target=self._discovery_broadcast_loop,
+            daemon=True
+        )
+        self._discovery_thread.start()
+        print("[Discovery] Broadcast started")
+    
+    def stop_discovery_broadcast(self):
+        """UDP 자동 발견 브로드캐스트 중지"""
+        self._discovery_running = False
+        if self._discovery_thread and self._discovery_thread.is_alive():
+            self._discovery_thread.join(timeout=3.0)
+        self._discovery_thread = None

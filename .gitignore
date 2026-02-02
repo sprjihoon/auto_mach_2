@@ -45,6 +45,7 @@ labels/
 work_sessions.json
 settings.json
 orders/
+.firewall_configured
 
 # PDF output files (generated at runtime)
 피킹리스트_*.pdf

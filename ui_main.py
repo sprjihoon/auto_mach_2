@@ -854,6 +854,13 @@ class MainWindow(QMainWindow):
         # 미리피킹에도 ESP32 연동 설정
         self.pre_pick_engine.set_esp32(self.device_registry, self.esp32_transport)
         
+        # ★ 출고 모드에도 ESP32 연동 설정 (합포장 빈 표시)
+        self.processor.set_esp32(
+            device_registry=self.device_registry,
+            esp32_transport=self.esp32_transport,
+            bin_manager=self.bin_manager
+        )
+        
         # 작업 세션 관리자
         self.session_manager = WorkSessionManager()
         
@@ -2091,7 +2098,53 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(device_group)
         
-        # ===== 4. 서버 로그 섹션 =====
+        # ===== 4. OTA 펌웨어 업데이트 섹션 =====
+        ota_group = QGroupBox("📦 OTA 펌웨어 업데이트 (무선)")
+        ota_layout = QVBoxLayout(ota_group)
+        
+        # 펌웨어 파일 선택
+        ota_file_row = QHBoxLayout()
+        ota_file_row.addWidget(QLabel("펌웨어 파일:"))
+        self.ota_firmware_path = QLineEdit()
+        self.ota_firmware_path.setPlaceholderText("firmware.bin 파일 선택...")
+        self.ota_firmware_path.setReadOnly(True)
+        ota_file_row.addWidget(self.ota_firmware_path, 1)
+        
+        self.ota_browse_btn = QPushButton("📂 찾아보기")
+        self.ota_browse_btn.clicked.connect(self._on_ota_browse_firmware)
+        ota_file_row.addWidget(self.ota_browse_btn)
+        ota_layout.addLayout(ota_file_row)
+        
+        # OTA 버튼
+        ota_btn_row = QHBoxLayout()
+        self.ota_update_all_btn = QPushButton("🚀 전체 장치 업데이트")
+        self.ota_update_all_btn.setToolTip("연결된 모든 ESP32에 펌웨어 업데이트")
+        self.ota_update_all_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
+        self.ota_update_all_btn.clicked.connect(self._on_ota_update_all)
+        ota_btn_row.addWidget(self.ota_update_all_btn)
+        
+        self.ota_reboot_all_btn = QPushButton("🔄 전체 재부팅")
+        self.ota_reboot_all_btn.setToolTip("연결된 모든 ESP32 재부팅")
+        self.ota_reboot_all_btn.clicked.connect(self._on_ota_reboot_all)
+        ota_btn_row.addWidget(self.ota_reboot_all_btn)
+        
+        ota_btn_row.addStretch()
+        
+        # 상태 표시
+        self.ota_status_label = QLabel("대기 중")
+        self.ota_status_label.setStyleSheet("color: #666;")
+        ota_btn_row.addWidget(self.ota_status_label)
+        
+        ota_layout.addLayout(ota_btn_row)
+        
+        # 안내 메시지
+        ota_info = QLabel("💡 펌웨어 파일(.bin)을 선택 후 '전체 장치 업데이트'를 클릭하면\n   연결된 모든 ESP32에 무선으로 펌웨어가 업데이트됩니다.")
+        ota_info.setStyleSheet("color: #888; font-size: 11px;")
+        ota_layout.addWidget(ota_info)
+        
+        layout.addWidget(ota_group)
+        
+        # ===== 5. 서버 로그 섹션 =====
         log_group = QGroupBox("📝 ESP32 서버 로그")
         log_layout = QVBoxLayout(log_group)
         
@@ -2168,16 +2221,34 @@ class MainWindow(QMainWindow):
         self._update_esp32_device_table()
     
     def _on_esp32_clear_bindings(self):
-        """ESP32 장치 바인딩 초기화"""
+        """ESP32 장치 바인딩 초기화 및 재할당"""
         reply = QMessageBox.question(
             self, "확인", 
-            "모든 장치 바인딩을 초기화하시겠습니까?",
+            "모든 장치 바인딩을 초기화하고 다시 할당하시겠습니까?",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            self.device_registry.clear_bindings()
+            # 1. 기존 바인딩 모두 초기화
+            self.device_registry.clear_all_bindings()
+            self.device_registry.reset_auto_bind_counter()
+            self._add_esp32_log("기존 바인딩 초기화됨")
+            
+            # 2. 연결된 장치들 순서대로 다시 바인딩
+            connected_devices = self.device_registry.get_connected_devices()
+            self._add_esp32_log(f"연결된 장치 {len(connected_devices)}대 재바인딩 시작...")
+            
+            for device in connected_devices:
+                device_id = device.device_id
+                bin_id = self.device_registry.auto_bind_device(device_id)
+                if bin_id:
+                    # ESP32에 새 바인딩 전송
+                    self.esp32_transport.send_bind(device_id, bin_id)
+                    self._add_esp32_log(f"재바인딩: {device_id} → {bin_id}")
+                else:
+                    self._add_esp32_log(f"[경고] 재바인딩 실패: {device_id}")
+            
             self._update_esp32_device_table()
-            self._add_esp32_log("모든 장치 바인딩이 초기화되었습니다.")
+            self._add_esp32_log("바인딩 초기화 완료!")
     
     def _on_esp32_test_all_devices(self):
         """모든 ESP32 장치에 테스트 신호 전송"""
@@ -2201,28 +2272,183 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'fp_log'):
             self.fp_log.append(f"[{timestamp}] [ESP32] {message}")
     
+    # ===== OTA 업데이트 관련 =====
+    
+    def _on_ota_browse_firmware(self):
+        """펌웨어 파일 선택"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "펌웨어 파일 선택",
+            "",
+            "Binary Files (*.bin);;All Files (*)"
+        )
+        if file_path:
+            self.ota_firmware_path.setText(file_path)
+            self._add_esp32_log(f"[OTA] 펌웨어 선택: {file_path}")
+    
+    def _on_ota_update_all(self):
+        """모든 연결된 장치에 OTA 업데이트"""
+        firmware_path = self.ota_firmware_path.text().strip()
+        
+        if not firmware_path:
+            QMessageBox.warning(self, "경고", "먼저 펌웨어 파일(.bin)을 선택해주세요.")
+            return
+        
+        if not os.path.exists(firmware_path):
+            QMessageBox.warning(self, "경고", "선택한 펌웨어 파일이 존재하지 않습니다.")
+            return
+        
+        connected = self.esp32_transport.get_connected_devices()
+        if not connected:
+            QMessageBox.warning(self, "경고", "연결된 ESP32 장치가 없습니다.")
+            return
+        
+        reply = QMessageBox.question(
+            self, "OTA 업데이트 확인",
+            f"연결된 {len(connected)}대 장치에 펌웨어 업데이트를 시작하시겠습니까?\n\n"
+            f"파일: {os.path.basename(firmware_path)}\n"
+            f"크기: {os.path.getsize(firmware_path):,} bytes\n\n"
+            f"⚠️ 업데이트 중 전원을 끄지 마세요!",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # HTTP 서버 시작하여 펌웨어 제공
+        self._start_ota_server(firmware_path, connected)
+    
+    def _start_ota_server(self, firmware_path: str, devices: list):
+        """OTA용 HTTP 서버 시작 및 OTA 명령 전송"""
+        import threading
+        from http.server import HTTPServer, SimpleHTTPRequestHandler
+        import socket
+        import shutil
+        import tempfile
+        import time
+        
+        self.ota_status_label.setText("서버 준비 중...")
+        self._add_esp32_log("[OTA] HTTP 서버 시작 중...")
+        
+        # PC의 IP 주소 가져오기
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            pc_ip = s.getsockname()[0]
+            s.close()
+        except:
+            pc_ip = "127.0.0.1"
+        
+        ota_port = 8766  # OTA용 별도 포트
+        firmware_url = f"http://{pc_ip}:{ota_port}/firmware.bin"
+        
+        # 펌웨어 파일을 임시 위치로 복사
+        temp_dir = tempfile.mkdtemp()
+        temp_firmware = os.path.join(temp_dir, "firmware.bin")
+        shutil.copy(firmware_path, temp_firmware)
+        
+        self._ota_temp_dir = temp_dir  # 나중에 정리용
+        
+        # 커스텀 핸들러
+        class FirmwareHandler(SimpleHTTPRequestHandler):
+            def __init__(handler_self, *args, **kwargs):
+                super().__init__(*args, directory=temp_dir, **kwargs)
+            
+            def log_message(handler_self, format, *args):
+                pass  # 로그 비활성화
+        
+        # HTTP 서버 시작 (별도 스레드)
+        def run_server():
+            try:
+                server = HTTPServer((pc_ip, ota_port), FirmwareHandler)
+                server.timeout = 5
+                
+                # 요청 처리 (최대 3분)
+                start_time = time.time()
+                while time.time() - start_time < 180:
+                    server.handle_request()
+                
+                server.server_close()
+            except Exception as e:
+                print(f"[OTA] Server error: {e}")
+            finally:
+                # 임시 파일 정리
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+        
+        threading.Thread(target=run_server, daemon=True).start()
+        
+        # 서버 시작 후 잠시 대기
+        time.sleep(0.5)
+        
+        # OTA 명령 전송
+        self._add_esp32_log(f"[OTA] 펌웨어 URL: {firmware_url}")
+        self.ota_status_label.setText(f"업데이트 중... ({len(devices)}대)")
+        
+        success = 0
+        for device_id in devices:
+            if self.esp32_transport.send_ota_update(device_id, firmware_url):
+                self._add_esp32_log(f"[OTA] 명령 전송: {device_id}")
+                success += 1
+            else:
+                self._add_esp32_log(f"[OTA] 명령 전송 실패: {device_id}")
+        
+        self._add_esp32_log(f"[OTA] {success}/{len(devices)}대 장치에 업데이트 명령 전송")
+        self.ota_status_label.setText(f"전송 완료 ({success}대)")
+        
+        QMessageBox.information(
+            self, "OTA 업데이트",
+            f"OTA 업데이트 명령이 전송되었습니다.\n\n"
+            f"전송: {success}/{len(devices)}대\n\n"
+            f"ESP32 화면에서 업데이트 진행 상황을 확인하세요.\n"
+            f"업데이트 완료 후 자동으로 재부팅됩니다."
+        )
+    
+    def _on_ota_reboot_all(self):
+        """모든 장치 재부팅"""
+        connected = self.esp32_transport.get_connected_devices()
+        if not connected:
+            QMessageBox.warning(self, "경고", "연결된 ESP32 장치가 없습니다.")
+            return
+        
+        reply = QMessageBox.question(
+            self, "재부팅 확인",
+            f"연결된 {len(connected)}대 장치를 재부팅하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            count = self.esp32_transport.send_reboot_all()
+            self._add_esp32_log(f"[Reboot] {count}대 장치에 재부팅 명령 전송")
+            QMessageBox.information(self, "재부팅", f"{count}대 장치에 재부팅 명령을 전송했습니다.")
+    
     def _update_esp32_device_table(self):
         """ESP32 장치 테이블 업데이트"""
         devices = self.device_registry.get_all_devices()
-        bindings = self.device_registry.get_bindings()
         
         self.esp32_device_table.setRowCount(len(devices))
         self.esp32_device_count.setText(f"{len(devices)}대")
         
-        for row, device_id in enumerate(devices):
+        for row, device in enumerate(devices):
             # 장치 ID
-            self.esp32_device_table.setItem(row, 0, QTableWidgetItem(device_id))
+            self.esp32_device_table.setItem(row, 0, QTableWidgetItem(device.device_id))
             
             # BIN 바인딩
-            bin_id = bindings.get(device_id, "미할당")
+            bin_id = device.bin_id or "미할당"
             self.esp32_device_table.setItem(row, 1, QTableWidgetItem(bin_id))
             
             # 상태
-            status = "🟢 연결됨"
+            status = "🟢 연결됨" if device.connected else "🔴 연결 끊김"
             self.esp32_device_table.setItem(row, 2, QTableWidgetItem(status))
             
             # 연결 시간
-            self.esp32_device_table.setItem(row, 3, QTableWidgetItem("-"))
+            if device.last_seen:
+                time_str = device.last_seen.strftime("%H:%M:%S")
+            else:
+                time_str = "-"
+            self.esp32_device_table.setItem(row, 3, QTableWidgetItem(time_str))
         
         # 전체피킹 탭 장치 수 동기화
         if hasattr(self, 'fp_device_count'):
@@ -2238,8 +2464,21 @@ class MainWindow(QMainWindow):
     
     @Slot(str)
     def _on_esp32_device_hello(self, device_id: str):
-        """ESP32 장치 연결 (ESP32 탭용)"""
+        """ESP32 장치 연결 (ESP32 탭용) - 자동 바인딩 포함"""
         self._add_esp32_log(f"장치 연결: {device_id}")
+        
+        # 장치 등록
+        self.device_registry.register_device(device_id)
+        
+        # 자동 바인딩
+        bin_id = self.device_registry.auto_bind_device(device_id)
+        if bin_id:
+            # 바인딩 명령 전송 (ESP32에 BIN 번호 알림)
+            self.esp32_transport.send_bind(device_id, bin_id)
+            self._add_esp32_log(f"자동 바인딩: {device_id} → {bin_id}")
+        else:
+            self._add_esp32_log(f"[경고] 자동 바인딩 실패: {device_id}")
+        
         self._update_esp32_device_table()
     
     @Slot(str)
@@ -3035,7 +3274,7 @@ class MainWindow(QMainWindow):
         self._update_settings_saved_pdf_list()
     
     def _update_settings_saved_pdf_list(self):
-        """설정 탭 - 저장된 피킹리스트 PDF 목록 업데이트"""
+        """설정 탭 - 저장된 피킹리스트 PDF 목록 업데이트 (오늘 파일만)"""
         self.settings_saved_pdf_list.clear()
         
         # 저장 경로 확인
@@ -3045,6 +3284,8 @@ class MainWindow(QMainWindow):
         
         # PDF 파일 검색 (피킹리스트 패턴)
         import glob
+        from datetime import datetime, date
+        
         pdf_patterns = [
             os.path.join(save_path, "*차*피킹*.pdf"),
             os.path.join(save_path, "*picking*.pdf"),
@@ -3059,15 +3300,23 @@ class MainWindow(QMainWindow):
         pdf_files = list(set(pdf_files))
         pdf_files.sort(key=os.path.getmtime, reverse=True)
         
-        for pdf_path in pdf_files[:10]:  # 최근 10개만 표시
+        # 오늘 날짜의 파일만 필터링
+        today = date.today()
+        today_pdf_files = []
+        for pdf_path in pdf_files:
+            file_mtime = datetime.fromtimestamp(os.path.getmtime(pdf_path)).date()
+            if file_mtime == today:
+                today_pdf_files.append(pdf_path)
+        
+        for pdf_path in today_pdf_files[:10]:  # 최근 10개만 표시
             filename = os.path.basename(pdf_path)
             item = QListWidgetItem(f"📄 {filename}")
             item.setData(Qt.UserRole, pdf_path)
             item.setToolTip(pdf_path)
             self.settings_saved_pdf_list.addItem(item)
         
-        if not pdf_files:
-            item = QListWidgetItem("저장된 피킹리스트가 없습니다")
+        if not today_pdf_files:
+            item = QListWidgetItem("오늘 저장된 피킹리스트가 없습니다")
             item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
             item.setForeground(QColor("#999"))
             self.settings_saved_pdf_list.addItem(item)
@@ -3141,10 +3390,17 @@ class MainWindow(QMainWindow):
     def _on_settings_open_saved_pdf(self, item):
         """설정 탭 - 저장된 피킹리스트 더블클릭 시 열기"""
         pdf_path = item.data(Qt.UserRole)
-        if pdf_path and os.path.exists(pdf_path):
-            os.startfile(pdf_path)
+        if pdf_path:
+            if os.path.exists(pdf_path):
+                try:
+                    os.startfile(pdf_path)
+                    self._add_log(f"[피킹리스트] 파일 열기: {pdf_path}")
+                except Exception as e:
+                    QMessageBox.warning(self, "오류", f"파일 열기 실패: {str(e)}\n\n경로: {pdf_path}")
+            else:
+                QMessageBox.warning(self, "오류", f"파일을 찾을 수 없습니다.\n\n경로: {pdf_path}")
         else:
-            QMessageBox.warning(self, "오류", "파일을 찾을 수 없습니다.")
+            QMessageBox.warning(self, "오류", "파일 경로 정보가 없습니다.")
     
     # ===== 차수 관리 이벤트 핸들러 =====
     
@@ -3636,6 +3892,12 @@ class MainWindow(QMainWindow):
         if not order_no:
             return
         
+        # ★ 작업차수 선택 확인
+        if self._pp_session_id <= 0:
+            QMessageBox.warning(self, "경고", "먼저 작업 차수를 선택해주세요.\n\n상단의 '작업 차수 선택' 드롭다운에서 차수를 선택하세요.")
+            self.pp_order_input.clear()
+            return
+        
         # 데이터 소스 설정 확인
         if self.excel_loader.df is not None:
             self.pre_pick_engine.set_data_source(self.excel_loader.df, self.bin_manager)
@@ -4117,6 +4379,12 @@ class MainWindow(QMainWindow):
         """SKU 스캔 처리"""
         barcode = self.fp_sku_input.text().strip()
         if not barcode:
+            return
+        
+        # ★ 작업차수 선택 확인
+        if self._fp_session_id <= 0:
+            QMessageBox.warning(self, "경고", "먼저 작업 차수를 선택해주세요.\n\n상단의 '작업 차수 선택' 드롭다운에서 차수를 선택하세요.")
+            self.fp_sku_input.clear()
             return
         
         # 데이터 소스 설정
@@ -5613,9 +5881,23 @@ class MainWindow(QMainWindow):
         if not self.esp32_transport.is_running:
             return
         
+        # 출고 탭(0)으로 전환
+        if tab_index == 0:
+            # 전체피킹, 미리피킹 LCD 모두 OFF
+            self._turn_off_fullpick_lcds()
+            self._turn_off_prepick_lcds()
+            # 출고 모드에 활성 송장이 있으면 LCD 다시 표시
+            if self.processor.current_tracking_no and self.processor._active_bins:
+                self.processor._send_remaining_bins_display(
+                    self.processor.current_tracking_no, 
+                    exclude_barcode=None
+                )
+                self._add_esp32_log("[모드전환] 출고 모드 LCD 활성화")
+        
         # 전체피킹 탭(1)으로 전환
-        if tab_index == 1:
-            # 미리피킹 LCD 모두 OFF
+        elif tab_index == 1:
+            # 출고, 미리피킹 LCD 모두 OFF
+            self._turn_off_shipment_lcds()
             self._turn_off_prepick_lcds()
             # 전체피킹에 활성 세션이 있으면 LCD 다시 표시
             if self.full_pick_engine.current_session:
@@ -5624,15 +5906,29 @@ class MainWindow(QMainWindow):
         
         # 미리피킹 탭(2)으로 전환
         elif tab_index == 2:
-            # 전체피킹 LCD 모두 OFF
+            # 출고, 전체피킹 LCD 모두 OFF
+            self._turn_off_shipment_lcds()
             self._turn_off_fullpick_lcds()
             # 미리피킹 활성 슬롯 LCD 다시 표시
             self.pre_pick_engine._update_all_lcd_displays()
             self._add_esp32_log("[모드전환] 미리피킹 LCD 활성화")
         
         # 다른 탭으로 전환 시 모든 LCD OFF
-        elif tab_index not in [1, 2, 4]:  # 전체피킹, 미리피킹, ESP32 탭 제외
+        elif tab_index not in [0, 1, 2, 4]:  # 출고, 전체피킹, 미리피킹, ESP32 탭 제외
             self._turn_off_all_lcds()
+    
+    def _turn_off_shipment_lcds(self):
+        """출고 모드 모든 LCD OFF"""
+        if not hasattr(self.processor, '_active_bins'):
+            return
+        
+        for bin_id in list(self.processor._active_bins):
+            device_id = self.device_registry.get_device_id_by_bin(bin_id)
+            if device_id:
+                self.esp32_transport.send_off(device_id, bin_id)
+        
+        # active_bins 리스트도 정리
+        self.processor._active_bins.clear()
     
     def _turn_off_fullpick_lcds(self):
         """전체피킹 모든 LCD OFF"""
@@ -5650,13 +5946,14 @@ class MainWindow(QMainWindow):
         for slot_id in range(1, self.pre_pick_engine.slot_manager.active_slot_count + 1):
             slot = self.pre_pick_engine.slot_manager.get_slot(slot_id)
             if slot and slot.state != SlotState.EMPTY:
-                for task in slot.tasks:
-                    device_id = self.device_registry.get_device_id_by_bin(task.bin_id)
+                for bin_id in slot.bins.keys():
+                    device_id = self.device_registry.get_device_id_by_bin(bin_id)
                     if device_id:
-                        self.esp32_transport.send_off(device_id, task.bin_id)
+                        self.esp32_transport.send_off(device_id, bin_id)
     
     def _turn_off_all_lcds(self):
         """모든 LCD OFF"""
+        self._turn_off_shipment_lcds()
         self._turn_off_fullpick_lcds()
         self._turn_off_prepick_lcds()
     

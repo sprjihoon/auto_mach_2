@@ -39,9 +39,13 @@
 #define TFT_BL   21   // Backlight (active HIGH)
 
 // ==========================================================
-// Touch Screen Pins (XPT2046) - Optional, not used in this project
+// Touch Screen Pins (XPT2046) - CYD uses SEPARATE SPI bus!
 // ==========================================================
-// #define TOUCH_CS 33
+#define TOUCH_CS   33    // T_CS
+#define TOUCH_MOSI 32    // T_DIN (Touch Data In)
+#define TOUCH_MISO 39    // T_DO  (Touch Data Out)
+#define TOUCH_CLK  25    // T_CLK (Touch Clock)
+// #define TOUCH_IRQ 36  // T_IRQ (optional interrupt)
 
 // ==========================================================
 // Fonts - Enable the fonts you need
