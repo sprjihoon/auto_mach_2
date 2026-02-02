@@ -213,3 +213,104 @@ def sanitize_tracking_no(tracking_no) -> str:
         return s[:-2]
     return s
 
+
+def get_unique_filepath(file_path: str, max_attempts: int = 10) -> str:
+    """
+    파일이 잠겨있거나 사용 중인 경우 대체 파일 경로 생성
+    
+    Args:
+        file_path: 원본 파일 경로
+        max_attempts: 최대 시도 횟수
+        
+    Returns:
+        사용 가능한 파일 경로
+    """
+    path = Path(file_path)
+    
+    # 원본 파일이 없거나 쓸 수 있으면 그대로 반환
+    if not path.exists():
+        return file_path
+    
+    # 파일이 잠겨있는지 확인
+    try:
+        with open(file_path, 'a'):
+            pass
+        return file_path
+    except (PermissionError, IOError):
+        pass
+    
+    # 대체 파일명 생성 (예: file_1.pdf, file_2.pdf, ...)
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    
+    for i in range(1, max_attempts + 1):
+        new_path = parent / f"{stem}_{i}{suffix}"
+        if not new_path.exists():
+            return str(new_path)
+        # 존재하지만 쓸 수 있는지 확인
+        try:
+            with open(new_path, 'a'):
+                pass
+            return str(new_path)
+        except (PermissionError, IOError):
+            continue
+    
+    # 최후의 수단: 타임스탬프 추가
+    timestamp = datetime.now().strftime("%H%M%S")
+    return str(parent / f"{stem}_{timestamp}{suffix}")
+
+
+def safe_save_file(save_func, file_path: str, max_attempts: int = 10):
+    """
+    Permission 오류 발생 시 자동으로 다른 이름으로 저장 재시도
+    
+    Args:
+        save_func: 실제 저장을 수행하는 함수 (file_path를 인자로 받음)
+        file_path: 원본 파일 경로
+        max_attempts: 최대 재시도 횟수
+        
+    Returns:
+        tuple: (성공 여부, 실제 저장된 파일 경로, 오류 메시지 또는 None)
+    """
+    path = Path(file_path)
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    
+    # 첫 번째 시도
+    try:
+        result = save_func(file_path)
+        return (True, file_path, None)
+    except PermissionError as e:
+        last_error = str(e)
+    except Exception as e:
+        # Permission 오류가 아니면 바로 실패
+        if "Permission denied" not in str(e) and "Errno 13" not in str(e):
+            return (False, file_path, str(e))
+        last_error = str(e)
+    
+    # 재시도
+    for i in range(1, max_attempts + 1):
+        new_path = str(parent / f"{stem}_{i}{suffix}")
+        try:
+            result = save_func(new_path)
+            return (True, new_path, None)
+        except PermissionError as e:
+            last_error = str(e)
+            continue
+        except Exception as e:
+            if "Permission denied" not in str(e) and "Errno 13" not in str(e):
+                return (False, new_path, str(e))
+            last_error = str(e)
+            continue
+    
+    # 최후의 수단: 타임스탬프 추가
+    timestamp = datetime.now().strftime("%H%M%S")
+    final_path = str(parent / f"{stem}_{timestamp}{suffix}")
+    try:
+        result = save_func(final_path)
+        return (True, final_path, None)
+    except Exception as e:
+        return (False, final_path, f"모든 시도 실패. 마지막 오류: {str(e)}")
+

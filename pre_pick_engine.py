@@ -58,6 +58,7 @@ class BinTask:
     qty: int                              # 필요 수량
     order_indices: List[int] = field(default_factory=list)  # DataFrame 인덱스
     barcodes: Set[str] = field(default_factory=set)         # 바코드 목록
+    done: bool = False                    # 완료 여부
 
 
 @dataclass
@@ -80,14 +81,24 @@ class SlotOrder:
         return len(self.bins)
     
     @property
-    def bin_list(self) -> List[Tuple[str, str, int]]:
-        """BIN 목록 (바코드, BIN, 수량) - 정렬됨"""
+    def bin_list(self) -> List[Tuple[str, str, int, bool]]:
+        """BIN 목록 (바코드, BIN, 수량, 완료여부) - 정렬됨"""
         result = []
         for bin_id, task in sorted(self.bins.items()):
             # 바코드가 여러 개면 쉼표로 구분
             barcodes_str = ", ".join(sorted(task.barcodes)) if task.barcodes else "-"
-            result.append((barcodes_str, bin_id, task.qty))
+            result.append((barcodes_str, bin_id, task.qty, task.done))
         return result
+    
+    @property
+    def all_bins_done(self) -> bool:
+        """모든 BIN 완료 여부"""
+        return all(task.done for task in self.bins.values()) if self.bins else False
+    
+    @property
+    def done_bins_count(self) -> int:
+        """완료된 BIN 개수"""
+        return sum(1 for task in self.bins.values() if task.done)
 
 
 # ============================================================
@@ -495,6 +506,7 @@ class PrePickEngine(QObject):
     already_picked = Signal(str)                   # tracking_no
     slots_full = Signal()                          # 슬롯이 가득 참
     slot_state_changed = Signal(int, object)       # slot_id, SlotState
+    bin_completed = Signal(int, str)               # slot_id, bin_id (개별 BIN 완료)
     log_message = Signal(str)                      # 로그 메시지
     error_occurred = Signal(str)                   # 에러 메시지
     
@@ -585,7 +597,76 @@ class PrePickEngine(QObject):
         self._device_registry = device_registry
         self._esp32_transport = esp32_transport
         self._lcd_enabled = True
+        
+        # ESP32 터치 완료 시그널 연결
+        if esp32_transport:
+            esp32_transport.device_done.connect(self._on_device_done)
+        
         self.log_message.emit("[미리피킹] ESP32 연동 활성화")
+    
+    def _on_device_done(self, bin_id: str, device_id: str):
+        """
+        ESP32 터치 완료 이벤트 처리
+        
+        Args:
+            bin_id: 완료된 BIN ID
+            device_id: 장치 ID
+        """
+        # 해당 BIN이 어느 슬롯에 있는지 찾기
+        for slot_id in [1, 2, 3]:
+            slot = self._slot_manager.get_slot(slot_id)
+            if slot and slot.state == SlotState.ACTIVE and bin_id in slot.bins:
+                self._complete_bin(slot_id, bin_id)
+                return
+        
+        self.log_message.emit(f"[미리피킹] BIN {bin_id} 터치 - 활성 슬롯에 없음")
+    
+    def _complete_bin(self, slot_id: int, bin_id: str) -> bool:
+        """
+        개별 BIN 완료 처리
+        
+        Args:
+            slot_id: 슬롯 번호
+            bin_id: BIN ID
+        
+        Returns:
+            성공 여부
+        """
+        slot = self._slot_manager.get_slot(slot_id)
+        if not slot or bin_id not in slot.bins:
+            return False
+        
+        task = slot.bins[bin_id]
+        if task.done:
+            self.log_message.emit(f"[미리피킹] 이미 완료된 BIN: {bin_id}")
+            return False
+        
+        # BIN 완료 처리
+        task.done = True
+        
+        # LCD OFF
+        if self._lcd_enabled and self._esp32_transport and self._device_registry:
+            device_id = self._device_registry.get_device_id_by_bin(bin_id)
+            if device_id:
+                self._esp32_transport.send_off(device_id, bin_id)
+        
+        # 완료 신호음 (짧은 비프)
+        import winsound
+        import threading
+        def _beep():
+            winsound.Beep(1000, 100)
+        threading.Thread(target=_beep, daemon=True).start()
+        
+        # 시그널
+        self.bin_completed.emit(slot_id, bin_id)
+        self.log_message.emit(f"[미리피킹] BIN 완료: {bin_id} (슬롯 {slot_id}, {slot.done_bins_count}/{slot.total_bins})")
+        
+        # 모든 BIN 완료 시 슬롯 자동 완료
+        if slot.all_bins_done:
+            self.log_message.emit(f"[미리피킹] 슬롯 {slot_id} 모든 BIN 완료 → 자동 완료 처리")
+            self.complete_slot(slot_id)
+        
+        return True
     
     def enable_lcd(self, enabled: bool = True):
         """LCD 연동 활성화/비활성화"""
@@ -788,6 +869,14 @@ class PrePickEngine(QObject):
     
     def clear_slot(self, slot_id: int) -> bool:
         """슬롯 비우기"""
+        # 먼저 해당 슬롯의 BIN들 LCD 끄기
+        slot = self._slot_manager.get_slot(slot_id)
+        if slot and self._lcd_enabled and self._esp32_transport and self._device_registry:
+            for bin_id in slot.bins.keys():
+                device_id = self._device_registry.get_device_id_by_bin(bin_id)
+                if device_id:
+                    self._esp32_transport.send_off(device_id, bin_id)
+        
         success = self._slot_manager.clear_slot(slot_id)
         if success:
             self.log_message.emit(f"[미리피킹] 슬롯 {slot_id} 비움")
@@ -824,6 +913,16 @@ class PrePickEngine(QObject):
     
     def reset(self):
         """엔진 초기화"""
+        # 모든 슬롯의 BIN LCD 끄기
+        if self._lcd_enabled and self._esp32_transport and self._device_registry:
+            for slot_id in [1, 2, 3]:
+                slot = self._slot_manager.get_slot(slot_id)
+                if slot:
+                    for bin_id in slot.bins.keys():
+                        device_id = self._device_registry.get_device_id_by_bin(bin_id)
+                        if device_id:
+                            self._esp32_transport.send_off(device_id, bin_id)
+        
         self._slot_manager.clear_all()
         self._bin_queue.clear()
         self._completed_orders.clear()

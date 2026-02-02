@@ -3360,23 +3360,31 @@ class MainWindow(QMainWindow):
             sku_bin_map = session.sku_bin_map if session.sku_bin_map else self.bin_manager._sku_bin_map
             
             from pdf_printer import create_picking_list_pdf
-            success = create_picking_list_pdf(filtered_df, file_path, sku_bin_map)
+            from utils import safe_save_file
+            
+            # Permission 오류 시 자동으로 다른 이름으로 재시도
+            def save_pdf(path):
+                if not create_picking_list_pdf(filtered_df, path, sku_bin_map):
+                    raise Exception("PDF 생성 실패")
+                return True
+            
+            success, actual_path, error = safe_save_file(save_pdf, file_path)
             
             if success:
-                self._last_pdf_path = file_path
+                actual_filename = os.path.basename(actual_path)
+                self._last_pdf_path = actual_path
                 self.settings_open_pdf_btn.setEnabled(True)
                 self._update_settings_saved_pdf_list()
-                QMessageBox.information(
-                    self, 
-                    "저장 완료", 
-                    f"피킹리스트가 저장되었습니다.\n\n"
-                    f"차수: {session.session_id}차\n"
-                    f"업체: {session.supplier_display}\n"
-                    f"파일: {filename}"
-                )
-                self._add_log(f"[피킹리스트] {session.session_id}차 PDF 저장: {file_path}")
+                
+                # 파일명이 변경되었으면 알림
+                msg = f"피킹리스트가 저장되었습니다.\n\n차수: {session.session_id}차\n업체: {session.supplier_display}\n파일: {actual_filename}"
+                if actual_path != file_path:
+                    msg += f"\n\n※ 원본 파일이 사용 중이어서 다른 이름으로 저장되었습니다."
+                
+                QMessageBox.information(self, "저장 완료", msg)
+                self._add_log(f"[피킹리스트] {session.session_id}차 PDF 저장: {actual_path}")
             else:
-                QMessageBox.warning(self, "오류", "피킹리스트 PDF 저장에 실패했습니다.")
+                QMessageBox.warning(self, "오류", f"피킹리스트 PDF 저장에 실패했습니다.\n{error if error else ''}")
         except Exception as e:
             QMessageBox.warning(self, "오류", f"PDF 저장 중 오류: {str(e)}")
     
@@ -3796,6 +3804,7 @@ class MainWindow(QMainWindow):
         self.pre_pick_engine.already_picked.connect(self._on_pp_already_picked)
         self.pre_pick_engine.slots_full.connect(self._on_pp_slots_full)
         self.pre_pick_engine.slot_state_changed.connect(self._on_pp_slot_state_changed)
+        self.pre_pick_engine.bin_completed.connect(self._on_pp_bin_completed)
         self.pre_pick_engine.log_message.connect(self._add_pp_log)
         self.pre_pick_engine.error_occurred.connect(self._on_pp_error)
     
@@ -3945,6 +3954,17 @@ class MainWindow(QMainWindow):
         """슬롯 상태 변경"""
         self._update_pp_slot_ui(slot_id)
     
+    @Slot(int, str)
+    def _on_pp_bin_completed(self, slot_id: int, bin_id: str):
+        """개별 BIN 완료 (ESP32 터치)"""
+        self._update_pp_slot_ui(slot_id)
+        
+        # 슬롯 정보 가져오기
+        slot = self.pre_pick_engine.slot_manager.get_slot(slot_id)
+        if slot:
+            self.pp_status_label.setText(f"✅ BIN {bin_id} 완료 ({slot.done_bins_count}/{slot.total_bins})")
+            self.pp_status_label.setStyleSheet("color: #4CAF50;")
+    
     def _on_pp_error(self, message: str):
         """에러 발생"""
         self.pp_status_label.setText(f"❌ {message}")
@@ -4060,20 +4080,27 @@ class MainWindow(QMainWindow):
                     }}
                 """)
             
-            # BIN 테이블 업데이트 (바코드, BIN, 수량)
+            # BIN 테이블 업데이트 (바코드, BIN, 수량, 완료여부)
             bin_list = slot.bin_list
             bin_table.setRowCount(len(bin_list))
-            for row, (barcodes, bin_id, qty) in enumerate(bin_list):
-                # 바코드
-                barcode_item = QTableWidgetItem(barcodes)
+            for row, (barcodes, bin_id, qty, done) in enumerate(bin_list):
+                # 바코드 (완료 시 체크 표시)
+                barcode_text = f"✅ {barcodes}" if done else barcodes
+                barcode_item = QTableWidgetItem(barcode_text)
+                if done:
+                    barcode_item.setBackground(QColor("#C8E6C9"))  # 연녹색 배경
                 bin_table.setItem(row, 0, barcode_item)
                 # BIN
                 bin_item = QTableWidgetItem(bin_id)
                 bin_item.setTextAlignment(Qt.AlignCenter)
+                if done:
+                    bin_item.setBackground(QColor("#C8E6C9"))
                 bin_table.setItem(row, 1, bin_item)
                 # 수량
                 qty_item = QTableWidgetItem(str(qty))
                 qty_item.setTextAlignment(Qt.AlignCenter)
+                if done:
+                    qty_item.setBackground(QColor("#C8E6C9"))
                 bin_table.setItem(row, 2, qty_item)
             
             total_label.setText(f"총 수량: {slot.total_qty}개")
@@ -4504,13 +4531,7 @@ class MainWindow(QMainWindow):
         # ★ 스캔 히스토리 상태 업데이트
         self._update_fp_scan_history_status(barcode, "✅ 완료")
         
-        QMessageBox.information(
-            self,
-            "피킹 완료",
-            f"SKU 피킹이 완료되었습니다.\n\n"
-            f"SKU: {barcode}\n"
-            f"총 수량: {total_qty}개"
-        )
+        # 알림창 제거 - ESP32 터치로 완료하면 추가 클릭 불필요
     
     @Slot(object)
     def _on_fp_state_changed(self, state: FullPickState):
@@ -5548,6 +5569,29 @@ class MainWindow(QMainWindow):
         self.remaining_label.setStyleSheet("color: #FF5722;")
         tracking_layout.addWidget(self.remaining_label)
         
+        # 현재 송장 취소 버튼
+        tracking_layout.addSpacing(20)
+        self.cancel_current_tracking_btn = QPushButton("❌ 현재 송장 취소")
+        self.cancel_current_tracking_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                font-weight: bold;
+                padding: 6px 12px;
+                border-radius: 4px;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+            QPushButton:disabled {
+                background-color: #ccc;
+            }
+        """)
+        self.cancel_current_tracking_btn.setEnabled(False)
+        self.cancel_current_tracking_btn.clicked.connect(self._on_cancel_current_tracking)
+        tracking_layout.addWidget(self.cancel_current_tracking_btn)
+        
         left_layout.addLayout(tracking_layout)
         
         # 상세 테이블 (BIN 컬럼 추가)
@@ -6445,11 +6489,7 @@ class MainWindow(QMainWindow):
             
             product_data.sort(key=get_bin_sort_key)
             
-            # PDF 생성
-            doc = SimpleDocTemplate(file_path, pagesize=A4, 
-                                   leftMargin=15*mm, rightMargin=15*mm,
-                                   topMargin=15*mm, bottomMargin=15*mm)
-            
+            # PDF 생성을 위한 요소 준비
             elements = []
             
             # 스타일
@@ -6571,16 +6611,48 @@ class MainWindow(QMainWindow):
             elements.append(Spacer(1, 5*mm))
             elements.append(Paragraph(f"총 {len(product_data)}개 품목 / {total_remaining}개 수량", summary_style))
             
-            # PDF 저장
-            doc.build(elements)
+            # PDF 저장 (Permission 오류 시 다른 이름으로 재시도)
+            from utils import get_unique_filepath
+            actual_path = file_path
+            max_attempts = 10
+            last_error = None
             
-            self._add_log(f"제품별 PDF 저장 완료: {file_path}")
+            for attempt in range(max_attempts):
+                try:
+                    if attempt > 0:
+                        # 재시도 시 새 파일 경로 생성
+                        stem = Path(file_path).stem
+                        suffix = Path(file_path).suffix
+                        parent = Path(file_path).parent
+                        actual_path = str(parent / f"{stem}_{attempt}{suffix}")
+                    
+                    doc = SimpleDocTemplate(actual_path, pagesize=A4, 
+                                           leftMargin=15*mm, rightMargin=15*mm,
+                                           topMargin=15*mm, bottomMargin=15*mm)
+                    doc.build(elements)
+                    break
+                except PermissionError as e:
+                    last_error = str(e)
+                    continue
+                except Exception as e:
+                    if "Permission denied" in str(e) or "Errno 13" in str(e):
+                        last_error = str(e)
+                        continue
+                    raise
+            else:
+                raise Exception(f"모든 저장 시도 실패. 마지막 오류: {last_error}")
+            
+            self._add_log(f"제품별 PDF 저장 완료: {actual_path}")
             
             # 마지막 PDF 경로 저장 및 열기 버튼 활성화
-            self._last_pdf_path = file_path
+            self._last_pdf_path = actual_path
             self.open_pdf_btn.setEnabled(True)
             
-            QMessageBox.information(self, "성공", f"PDF가 저장되었습니다.\n{file_path}")
+            # 파일명이 변경되었으면 알림
+            if actual_path != file_path:
+                QMessageBox.information(self, "성공", f"PDF가 저장되었습니다.\n{actual_path}\n\n※ 원본 파일이 사용 중이어서 다른 이름으로 저장되었습니다.")
+            else:
+                QMessageBox.information(self, "성공", f"PDF가 저장되었습니다.\n{actual_path}")
             
         except ImportError:
             QMessageBox.warning(self, "오류", "reportlab 패키지가 필요합니다.\npip install reportlab")
@@ -7585,6 +7657,31 @@ class MainWindow(QMainWindow):
         """오류 발생"""
         self._add_log(f"<span style='color:#F44336'>[오류] {message}</span>", html=True)
     
+    def _on_cancel_current_tracking(self):
+        """현재 송장 취소"""
+        tracking_no = self.processor.current_tracking_no
+        if not tracking_no:
+            return
+        
+        # 확인 없이 바로 취소 (빠른 작업을 위해)
+        self._add_log(f"[취소] 송장 {tracking_no} 작업 취소")
+        
+        # 스캔한 수량 초기화
+        if self.excel_loader.df is not None:
+            mask = self.excel_loader.df['tracking_no'] == tracking_no
+            if mask.any():
+                self.excel_loader.df.loc[mask, 'scanned_qty'] = 0
+        
+        # ESP32 LCD 끄기
+        self.processor._clear_all_bin_displays()
+        
+        # 현재 송장 초기화
+        self.processor.reset_current_tracking()
+        
+        # UI 업데이트
+        self._update_tables()
+        self._add_log(f"[취소] 송장 {tracking_no} 초기화 완료 - 다시 스캔하세요")
+    
     # === UI 업데이트 ===
     
     def _update_tables(self):
@@ -7601,9 +7698,11 @@ class MainWindow(QMainWindow):
             self.remaining_label.setText("0")
             self._update_bin_display(["BIN 미지정"])
             self.detail_table.setRowCount(0)
+            self.cancel_current_tracking_btn.setEnabled(False)
             return
         
         self.current_tracking_label.setText(tracking_no)
+        self.cancel_current_tracking_btn.setEnabled(True)
         
         # 현재 송장의 모든 SKU에 대한 BIN 주소 수집
         items = self.processor.get_current_tracking_items()
