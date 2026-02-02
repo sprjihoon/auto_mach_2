@@ -1291,32 +1291,56 @@ def create_picking_list_pdf(df, output_path: str, sku_bin_map: dict = None) -> b
             else:
                 df_copy['bin'] = '-'
             
-            # SKU별 집계
-            sku_summary = df_copy.groupby(['barcode', 'bin']).agg({
+            # 로케이션 칼럼 존재 여부 확인
+            has_location = 'location' in df_copy.columns
+            
+            # SKU별 집계 (로케이션 포함)
+            agg_dict = {
                 'qty': 'sum',
                 'product_name': 'first'
-            }).reset_index()
+            }
+            if has_location:
+                agg_dict['location'] = 'first'
+            
+            sku_summary = df_copy.groupby(['barcode', 'bin']).agg(agg_dict).reset_index()
             
             # BIN 순서로 정렬
             sku_summary = sku_summary.sort_values(['bin', 'barcode'])
             
-            # 테이블 데이터 생성
-            table_data = [['BIN', '바코드', '상품명', '수량']]
+            # 테이블 데이터 생성 (로케이션 포함 여부에 따라)
+            if has_location:
+                table_data = [['BIN', '로케이션', '바코드', '상품명', '수량']]
+            else:
+                table_data = [['BIN', '바코드', '상품명', '수량']]
             
             for _, row in sku_summary.iterrows():
                 bin_val = str(row['bin']) if row['bin'] else '-'
                 barcode = str(row['barcode'])
-                product_name = str(row['product_name'])[:30] if row['product_name'] else '-'
+                # 상품명이 27자 초과하면 "..."으로 줄임
+                raw_name = str(row['product_name']) if row['product_name'] else '-'
+                product_name = raw_name[:27] + '...' if len(raw_name) > 27 else raw_name
                 qty = int(row['qty'])
                 
-                table_data.append([bin_val, barcode, product_name, str(qty)])
+                if has_location:
+                    location = str(row['location']) if pd.notna(row.get('location')) else '-'
+                    table_data.append([bin_val, location, barcode, product_name, str(qty)])
+                else:
+                    table_data.append([bin_val, barcode, product_name, str(qty)])
             
             # 합계 행
             total_qty = int(sku_summary['qty'].sum())
-            table_data.append(['합계', '', f'{len(sku_summary)}종', str(total_qty)])
+            if has_location:
+                table_data.append(['합계', '', '', f'{len(sku_summary)}종', str(total_qty)])
+            else:
+                table_data.append(['합계', '', f'{len(sku_summary)}종', str(total_qty)])
             
-            # 테이블 생성
-            col_widths = [25*mm, 45*mm, 80*mm, 25*mm]
+            # 테이블 생성 (로케이션 포함 여부에 따라 칼럼 너비 조정)
+            if has_location:
+                col_widths = [20*mm, 25*mm, 40*mm, 65*mm, 20*mm]
+                product_name_col = 3  # 상품명 칼럼 인덱스
+            else:
+                col_widths = [25*mm, 45*mm, 80*mm, 25*mm]
+                product_name_col = 2  # 상품명 칼럼 인덱스
             table = Table(table_data, colWidths=col_widths)
             
             # 테이블 스타일
@@ -1326,7 +1350,7 @@ def create_picking_list_pdf(df, output_path: str, sku_bin_map: dict = None) -> b
                 ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
                 ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('ALIGN', (2, 1), (2, -1), 'LEFT'),  # 상품명은 왼쪽 정렬
+                ('ALIGN', (product_name_col, 1), (product_name_col, -1), 'LEFT'),  # 상품명은 왼쪽 정렬
                 ('FONTSIZE', (0, 0), (-1, 0), 10),
                 ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
                 ('BACKGROUND', (0, -1), (-1, -1), colors.lightgrey),
