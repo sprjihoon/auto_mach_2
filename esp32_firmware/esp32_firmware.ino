@@ -462,13 +462,13 @@ void saveSettings() {
 
 // ===== 설정 웹페이지 HTML =====
 String getSetupPage() {
-    String html = R"(
+    String html = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AutoMach ESP32 설정</title>
+    <title>AutoMach ESP32 Setup</title>
     <style>
         * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
         body { margin: 0; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
@@ -479,17 +479,20 @@ String getSetupPage() {
         .device-id { background: #f0f0f0; padding: 8px 12px; border-radius: 8px; text-align: center; margin-bottom: 20px; font-family: monospace; }
         .form-group { margin-bottom: 20px; }
         label { display: block; margin-bottom: 8px; font-weight: 600; color: #333; font-size: 14px; }
-        input { width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 16px; transition: border-color 0.2s; }
-        input:focus { outline: none; border-color: #667eea; }
+        input, select { width: 100%; padding: 14px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 16px; transition: border-color 0.2s; background: white; }
+        input:focus, select:focus { outline: none; border-color: #667eea; }
         .hint { font-size: 12px; color: #888; margin-top: 5px; }
         button { width: 100%; padding: 16px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; }
         button:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(102,126,234,0.4); }
         button:active { transform: translateY(0); }
-        .status { margin-top: 20px; padding: 15px; border-radius: 10px; text-align: center; display: none; }
-        .status.success { display: block; background: #d4edda; color: #155724; }
-        .status.error { display: block; background: #f8d7da; color: #721c24; }
         .divider { border-top: 1px solid #eee; margin: 25px 0; }
         .section-title { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 15px; }
+        .scan-btn { padding: 10px 16px; font-size: 14px; margin-bottom: 10px; background: linear-gradient(135deg, #28a745 0%, #20c997 100%); }
+        .scan-btn:disabled { background: #ccc; cursor: not-allowed; transform: none; }
+        .wifi-select { margin-bottom: 10px; }
+        .manual-toggle { font-size: 13px; color: #667eea; cursor: pointer; text-decoration: underline; margin-top: 8px; display: inline-block; }
+        .manual-input { display: none; margin-top: 10px; }
+        .manual-input.show { display: block; }
     </style>
 </head>
 <body>
@@ -497,25 +500,32 @@ String getSetupPage() {
         <div class="card">
             <h1>AutoMach Setup</h1>
             <p class="subtitle">ESP32 Picking Device WiFi Setup</p>
-            <div class="device-id">)";
+            <div class="device-id">)rawliteral";
     html += deviceId;
-    html += R"(</div>
+    html += R"rawliteral(</div>
             
             <form action="/save" method="POST">
                 <div class="section-title">WiFi Connection</div>
                 
                 <div class="form-group">
                     <label>WiFi Name (SSID)</label>
-                    <input type="text" name="ssid" value=")";
+                    <button type="button" class="scan-btn" id="scanBtn" onclick="scanWifi()">Scan WiFi Networks</button>
+                    <select class="wifi-select" id="wifiSelect" name="ssid" onchange="onWifiSelect()">
+                        <option value="">-- Click Scan to find networks --</option>
+                    </select>
+                    <span class="manual-toggle" onclick="toggleManual()">+ Enter manually</span>
+                    <div class="manual-input" id="manualInput">
+                        <input type="text" id="manualSsid" placeholder="Enter SSID manually" value=")rawliteral";
     html += wifiSSID;
-    html += R"(" required placeholder="WiFi network name">
+    html += R"rawliteral(">
+                    </div>
                 </div>
                 
                 <div class="form-group">
                     <label>WiFi Password</label>
-                    <input type="password" name="password" value=")";
+                    <input type="password" name="password" value=")rawliteral";
     html += wifiPassword;
-    html += R"(" placeholder="Enter password">
+    html += R"rawliteral(" placeholder="Enter password">
                     <div class="hint">Leave empty for open network</div>
                 </div>
                 
@@ -524,17 +534,17 @@ String getSetupPage() {
                 
                 <div class="form-group">
                     <label>PC IP Address</label>
-                    <input type="text" name="host" value=")";
+                    <input type="text" name="host" value=")rawliteral";
     html += wsHost;
-    html += R"(" required placeholder="e.g. 192.168.0.100">
+    html += R"rawliteral(" required placeholder="e.g. 192.168.0.100">
                     <div class="hint">Run ipconfig on PC to find</div>
                 </div>
                 
                 <div class="form-group">
                     <label>Port Number</label>
-                    <input type="number" name="port" value=")";
+                    <input type="number" name="port" value=")rawliteral";
     html += String(wsPort);
-    html += R"(" required placeholder="8765">
+    html += R"rawliteral(" required placeholder="8765">
                     <div class="hint">Default: 8765</div>
                 </div>
                 
@@ -542,9 +552,84 @@ String getSetupPage() {
             </form>
         </div>
     </div>
+    <script>
+        let manualMode = false;
+        
+        function scanWifi() {
+            const btn = document.getElementById('scanBtn');
+            const select = document.getElementById('wifiSelect');
+            
+            btn.disabled = true;
+            btn.textContent = 'Scanning...';
+            select.innerHTML = '<option value="">Scanning...</option>';
+            
+            fetch('/scan')
+                .then(r => r.json())
+                .then(data => {
+                    select.innerHTML = '<option value="">-- Select WiFi Network --</option>';
+                    data.sort((a, b) => b.rssi - a.rssi);
+                    
+                    data.forEach(ap => {
+                        const opt = document.createElement('option');
+                        opt.value = ap.ssid;
+                        let signal = '';
+                        if (ap.rssi >= -50) signal = '****';
+                        else if (ap.rssi >= -60) signal = '*** ';
+                        else if (ap.rssi >= -70) signal = '**  ';
+                        else signal = '*   ';
+                        const lock = ap.secure ? 'L' : 'O';
+                        opt.textContent = ap.ssid + ' [' + lock + '] ' + signal + ' (' + ap.rssi + 'dBm)';
+                        select.appendChild(opt);
+                    });
+                    
+                    if (data.length === 0) {
+                        select.innerHTML = '<option value="">No networks found</option>';
+                    }
+                    
+                    btn.disabled = false;
+                    btn.textContent = 'Scan Again';
+                })
+                .catch(err => {
+                    select.innerHTML = '<option value="">Scan failed - try again</option>';
+                    btn.disabled = false;
+                    btn.textContent = 'Scan WiFi Networks';
+                });
+        }
+        
+        function onWifiSelect() {
+            const select = document.getElementById('wifiSelect');
+            if (select.value && manualMode) {
+                document.getElementById('manualInput').classList.remove('show');
+                manualMode = false;
+            }
+        }
+        
+        function toggleManual() {
+            manualMode = !manualMode;
+            const manualDiv = document.getElementById('manualInput');
+            const select = document.getElementById('wifiSelect');
+            if (manualMode) {
+                manualDiv.classList.add('show');
+                select.value = '';
+            } else {
+                manualDiv.classList.remove('show');
+            }
+        }
+        
+        document.querySelector('form').addEventListener('submit', function(e) {
+            if (manualMode) {
+                const manualSsid = document.getElementById('manualSsid').value;
+                if (manualSsid) {
+                    document.getElementById('wifiSelect').innerHTML = '<option value="' + manualSsid + '" selected>' + manualSsid + '</option>';
+                }
+            }
+        });
+        
+        setTimeout(scanWifi, 500);
+    </script>
 </body>
 </html>
-)";
+)rawliteral";
     return html;
 }
 
@@ -621,6 +706,29 @@ void handleSave() {
     ESP.restart();
 }
 
+// ===== WiFi 스캔 핸들러 =====
+void handleScan() {
+    Serial.println("WiFi 스캔 시작...");
+    
+    int n = WiFi.scanNetworks();
+    String json = "[";
+    
+    for (int i = 0; i < n; i++) {
+        if (i > 0) json += ",";
+        json += "{";
+        json += "\"ssid\":\"" + WiFi.SSID(i) + "\",";
+        json += "\"rssi\":" + String(WiFi.RSSI(i)) + ",";
+        json += "\"secure\":" + String(WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+        json += "}";
+    }
+    json += "]";
+    
+    WiFi.scanDelete();
+    
+    server.send(200, "application/json", json);
+    Serial.println("스캔 완료: " + String(n) + "개 AP 발견");
+}
+
 // ===== 설정 모드 시작 =====
 void startSetupMode() {
     setupMode = true;
@@ -629,8 +737,8 @@ void startSetupMode() {
     Serial.println("  WiFi Setup Mode!");
     Serial.println("========================================");
     
-    // AP 모드로 전환
-    WiFi.mode(WIFI_AP);
+    // AP+STA 모드로 전환 (AP 역할 + WiFi 스캔 가능)
+    WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(AP_SSID, AP_PASSWORD);
     
     IPAddress IP = WiFi.softAPIP();
@@ -640,6 +748,7 @@ void startSetupMode() {
     // 웹서버 설정
     server.on("/", handleRoot);
     server.on("/save", HTTP_POST, handleSave);
+    server.on("/scan", HTTP_GET, handleScan);
     server.begin();
     
     Serial.println("Web server started!");
