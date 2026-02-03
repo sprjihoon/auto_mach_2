@@ -260,6 +260,20 @@ class Esp32Transport(QObject):
             # ★ UDP 자동 발견 브로드캐스트 중지
             self.stop_discovery_broadcast()
             
+            # ★ 기존 WebSocket 연결들 모두 닫기
+            if self._event_loop and self._connections:
+                async def close_all_connections():
+                    for device_id, ws in list(self._connections.items()):
+                        try:
+                            await ws.close()
+                            print(f"[ESP32Transport] 연결 종료: {device_id}")
+                        except Exception as e:
+                            print(f"[ESP32Transport] 연결 종료 오류 ({device_id}): {e}")
+                
+                # 이벤트 루프에서 연결 종료 실행
+                if self._event_loop.is_running():
+                    asyncio.run_coroutine_threadsafe(close_all_connections(), self._event_loop).result(timeout=5)
+            
             if self._server:
                 self._server.close()
             
