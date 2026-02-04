@@ -139,8 +139,8 @@ class OrderProcessor(QObject):
         timestamp = get_timestamp()
         current_time = time_module.time()
         
-        # 같은 바코드 0.5초 내 재스캔 방지 (스캐너 더블 스캔 방지용)
-        if barcode == self._last_barcode and (current_time - self._last_scan_time) < 0.5:
+        # 같은 바코드 1초 내 재스캔 방지 (스캐너 더블 스캔 방지용)
+        if barcode == self._last_barcode and (current_time - self._last_scan_time) < 1.0:
             self.log_message.emit(f"[무시] 더블 스캔 방지: {barcode}")
             # None 대신 일관된 ScanEvent 반환
             return ScanEvent(

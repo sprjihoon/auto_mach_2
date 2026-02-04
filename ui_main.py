@@ -5594,11 +5594,11 @@ class MainWindow(QMainWindow):
         
         left_layout.addLayout(tracking_layout)
         
-        # 상세 테이블 (BIN 컬럼 추가)
+        # 상세 테이블 (BIN, 로케이션 컬럼 포함)
         self.detail_table = QTableWidget()
-        self.detail_table.setColumnCount(7)
+        self.detail_table.setColumnCount(8)
         self.detail_table.setHorizontalHeaderLabels([
-            "상품명", "옵션명", "바코드", "필요수량", "스캔수량", "남은수량", "BIN"
+            "상품명", "옵션명", "바코드", "필요수량", "스캔수량", "남은수량", "로케이션", "BIN"
         ])
         self.detail_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.detail_table.setAlternatingRowColors(True)
@@ -5649,6 +5649,26 @@ class MainWindow(QMainWindow):
         scan_layout.addWidget(self.manual_scan_btn)
         
         right_layout.addWidget(scan_group)
+        
+        # ★ 남은 주문 요약 버튼
+        summary_btn_layout = QHBoxLayout()
+        self.remaining_summary_btn = QPushButton("📋 남은 주문 요약")
+        self.remaining_summary_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #F57C00;
+            }
+        """)
+        self.remaining_summary_btn.clicked.connect(self._show_remaining_summary)
+        summary_btn_layout.addWidget(self.remaining_summary_btn)
+        summary_btn_layout.addStretch()
+        right_layout.addLayout(summary_btn_layout)
         
         # 탭으로 구성별/제품별 구분
         from PySide6.QtWidgets import QTabWidget
@@ -5758,6 +5778,166 @@ class MainWindow(QMainWindow):
             if "설정" in self.tab_widget.tabText(i):
                 self.tab_widget.setCurrentIndex(i)
                 break
+    
+    def _show_remaining_summary(self):
+        """남은 주문 요약 다이얼로그 표시"""
+        if self.excel_loader.df is None:
+            QMessageBox.warning(self, "경고", "먼저 엑셀 파일을 로드하세요.")
+            return
+        
+        # 남은 항목 가져오기
+        pending = self.excel_loader.get_all_pending()
+        if pending.empty:
+            QMessageBox.information(self, "완료", "모든 주문이 처리되었습니다!")
+            return
+        
+        # 다이얼로그 생성
+        dialog = QDialog(self)
+        dialog.setWindowTitle("📋 남은 주문 요약")
+        dialog.setMinimumSize(900, 600)
+        dialog.setModal(True)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # 상단 요약 정보
+        summary_frame = QFrame()
+        summary_frame.setStyleSheet("""
+            QFrame {
+                background-color: #E3F2FD;
+                border-radius: 8px;
+                padding: 10px;
+            }
+        """)
+        summary_layout = QHBoxLayout(summary_frame)
+        
+        # 남은 송장 수
+        remaining_tracking = pending['tracking_no'].nunique()
+        tracking_label = QLabel(f"📦 남은 송장: {remaining_tracking}건")
+        tracking_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #1565C0;")
+        summary_layout.addWidget(tracking_label)
+        
+        summary_layout.addSpacing(30)
+        
+        # 남은 제품 수 (행 수)
+        remaining_items = len(pending)
+        items_label = QLabel(f"📋 남은 항목: {remaining_items}건")
+        items_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2E7D32;")
+        summary_layout.addWidget(items_label)
+        
+        summary_layout.addSpacing(30)
+        
+        # 남은 총 수량
+        remaining_qty = int((pending['qty'] - pending['scanned_qty']).sum())
+        qty_label = QLabel(f"📊 남은 수량: {remaining_qty}개")
+        qty_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #E65100;")
+        summary_layout.addWidget(qty_label)
+        
+        summary_layout.addStretch()
+        layout.addWidget(summary_frame)
+        
+        # 테이블
+        table = QTableWidget()
+        table.setColumnCount(8)
+        table.setHorizontalHeaderLabels([
+            "송장번호", "상품명", "옵션명", "바코드", "로케이션", "필요", "스캔", "남은"
+        ])
+        
+        # 칼럼 너비 설정
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.Fixed)
+        header.setSectionResizeMode(4, QHeaderView.Fixed)
+        header.setSectionResizeMode(5, QHeaderView.Fixed)
+        header.setSectionResizeMode(6, QHeaderView.Fixed)
+        header.setSectionResizeMode(7, QHeaderView.Fixed)
+        table.setColumnWidth(0, 120)
+        table.setColumnWidth(3, 120)
+        table.setColumnWidth(4, 80)
+        table.setColumnWidth(5, 50)
+        table.setColumnWidth(6, 50)
+        table.setColumnWidth(7, 50)
+        
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        
+        # 송장별로 그룹화하여 정렬
+        pending_sorted = pending.sort_values(['tracking_no', 'barcode'])
+        table.setRowCount(len(pending_sorted))
+        
+        current_tracking = None
+        for row, (_, item) in enumerate(pending_sorted.iterrows()):
+            tracking_no = str(item['tracking_no'])
+            
+            # 송장번호 (같은 송장은 한 번만 표시)
+            if tracking_no != current_tracking:
+                tracking_item = QTableWidgetItem(tracking_no)
+                tracking_item.setFont(QFont("Consolas", 10, QFont.Bold))
+                tracking_item.setBackground(QColor("#E8EAF6"))
+                current_tracking = tracking_no
+            else:
+                tracking_item = QTableWidgetItem("")
+            table.setItem(row, 0, tracking_item)
+            
+            # 상품명
+            product_name = str(item['product_name']) if pd.notna(item['product_name']) else ''
+            table.setItem(row, 1, QTableWidgetItem(product_name))
+            
+            # 옵션명
+            option_name = str(item['option_name']) if pd.notna(item['option_name']) else ''
+            table.setItem(row, 2, QTableWidgetItem(option_name))
+            
+            # 바코드
+            barcode = str(item['barcode']) if pd.notna(item['barcode']) else ''
+            barcode_item = QTableWidgetItem(barcode)
+            barcode_item.setFont(QFont("Consolas", 10))
+            table.setItem(row, 3, barcode_item)
+            
+            # 로케이션
+            location = str(item.get('location', '')) if pd.notna(item.get('location')) else ''
+            location_item = QTableWidgetItem(location)
+            location_item.setTextAlignment(Qt.AlignCenter)
+            if location:
+                location_item.setBackground(QColor("#FFF9C4"))
+            table.setItem(row, 4, location_item)
+            
+            # 필요수량
+            qty = int(item['qty']) if pd.notna(item['qty']) else 0
+            qty_item = QTableWidgetItem(str(qty))
+            qty_item.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row, 5, qty_item)
+            
+            # 스캔수량
+            scanned = int(item['scanned_qty']) if pd.notna(item['scanned_qty']) else 0
+            scanned_item = QTableWidgetItem(str(scanned))
+            scanned_item.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row, 6, scanned_item)
+            
+            # 남은수량
+            remaining = qty - scanned
+            remaining_item = QTableWidgetItem(str(remaining))
+            remaining_item.setTextAlignment(Qt.AlignCenter)
+            if remaining > 0:
+                remaining_item.setBackground(QColor("#FFCDD2"))
+                remaining_item.setFont(QFont("Arial", 10, QFont.Bold))
+            table.setItem(row, 7, remaining_item)
+        
+        layout.addWidget(table)
+        
+        # 하단 버튼
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        close_btn = QPushButton("닫기")
+        close_btn.setMinimumWidth(100)
+        close_btn.clicked.connect(dialog.accept)
+        btn_layout.addWidget(close_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        dialog.exec()
     
     def _create_status_bar(self):
         """상태바 생성"""
@@ -7500,8 +7680,8 @@ class MainWindow(QMainWindow):
             self._ui_last_scan_time = 0
         
         current_time = time_module.time()
-        if barcode == self._ui_last_barcode and (current_time - self._ui_last_scan_time) < 1.0:
-            return  # 중복 무시 (로그 없이)
+        if barcode == self._ui_last_barcode and (current_time - self._ui_last_scan_time) < 2.0:
+            return  # 중복 무시 (로그 없이) - 2초로 늘림 (EzAuto 입력 시간 고려)
         
         self._ui_last_barcode = barcode
         self._ui_last_scan_time = current_time
@@ -7590,13 +7770,19 @@ class MainWindow(QMainWindow):
                     self.detail_table.setItem(row, 4, QTableWidgetItem(str(int(item['scanned_qty']))))
                     self.detail_table.setItem(row, 5, QTableWidgetItem(str(item_remaining)))
                     
+                    # 로케이션 컬럼
+                    location = str(item.get('location', '')) if pd.notna(item.get('location')) else ''
+                    location_item = QTableWidgetItem(location)
+                    location_item.setTextAlignment(Qt.AlignCenter)
+                    self.detail_table.setItem(row, 6, location_item)
+                    
                     # BIN 컬럼
                     bin_item = QTableWidgetItem(bin_display)
                     bin_item.setTextAlignment(Qt.AlignCenter)
                     bg_color, _ = self._get_bin_color(bin_id)
                     bin_item.setBackground(QColor(bg_color))
                     bin_item.setForeground(QColor("#FFFFFF"))
-                    self.detail_table.setItem(row, 6, bin_item)
+                    self.detail_table.setItem(row, 7, bin_item)
             
             # UI 즉시 갱신
             QApplication.processEvents()
@@ -7742,6 +7928,12 @@ class MainWindow(QMainWindow):
             self.detail_table.setItem(row, 4, QTableWidgetItem(str(item['scanned_qty'])))
             self.detail_table.setItem(row, 5, QTableWidgetItem(str(item_remaining)))
             
+            # 로케이션 컬럼
+            location = str(item.get('location', '')) if pd.notna(item.get('location')) else ''
+            location_item = QTableWidgetItem(location)
+            location_item.setTextAlignment(Qt.AlignCenter)
+            self.detail_table.setItem(row, 6, location_item)
+            
             # BIN 컬럼 추가 (공유 BIN은 ★ 표시)
             bin_item = QTableWidgetItem(bin_display)
             bin_item.setTextAlignment(Qt.AlignCenter)
@@ -7749,11 +7941,11 @@ class MainWindow(QMainWindow):
             bg_color, _ = self._get_bin_color(bin_id)
             bin_item.setBackground(QColor(bg_color))
             bin_item.setForeground(QColor("#FFFFFF"))
-            self.detail_table.setItem(row, 6, bin_item)
+            self.detail_table.setItem(row, 7, bin_item)
             
             # 완료된 항목은 녹색으로 표시
             if item_remaining == 0:
-                for col in range(6):  # BIN 컬럼 제외
+                for col in range(7):  # BIN 컬럼 제외
                     self.detail_table.item(row, col).setBackground(QColor("#E8F5E9"))
     
     def _update_summary_table(self):

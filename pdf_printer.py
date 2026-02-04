@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 from PySide6.QtCore import QObject, Signal
 
+import pandas as pd
+
 from utils import get_pdf_path, pdf_exists
 from printer_manager import print_pdf_with_printer, load_printer_settings, load_label_rotation
 

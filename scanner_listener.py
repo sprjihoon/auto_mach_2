@@ -145,10 +145,10 @@ class ScannerListener(QObject):
         import time
         current_time = time.time() * 1000  # ms
         
-        # ★ resume 직후 쿨다운 체크 (0.3초간 입력 무시)
+        # ★ resume 직후 쿨다운 체크 (0.5초간 입력 무시 - EzAuto 안정화 대기)
         if hasattr(self, '_resume_time'):
             elapsed_since_resume = time.time() - self._resume_time
-            if elapsed_since_resume < 0.3:
+            if elapsed_since_resume < 0.5:
                 # 쿨다운 중: 버퍼 클리어하고 무시
                 with self._lock:
                     self._buffer = ""
@@ -170,10 +170,10 @@ class ScannerListener(QObject):
                     
                     # 최소 길이 확인
                     if barcode and len(barcode) >= self.MIN_BARCODE_LENGTH:
-                        # 같은 바코드 1초 내 중복 emit 방지
+                        # 같은 바코드 2초 내 중복 emit 방지 (EzAuto 입력 시간 고려)
                         import time
                         now = time.time()
-                        if barcode == self._last_emitted_barcode and (now - self._last_emit_time) < 1.0:
+                        if barcode == self._last_emitted_barcode and (now - self._last_emit_time) < 2.0:
                             return  # 중복 무시
                         
                         self._last_emitted_barcode = barcode
@@ -235,7 +235,8 @@ class ScannerListener(QObject):
             # self._last_emitted_barcode = ""  # 초기화하지 않음
             # self._last_emit_time = 0  # 초기화하지 않음
             self._last_key_time = 0
-            # ★ 쿨다운: resume 직후 0.3초간 입력 무시
+            self._is_fast_input = False  # 빠른 입력 모드 리셋
+            # ★ 쿨다운: resume 직후 0.5초간 입력 무시 (EzAuto 안정화 대기)
             self._resume_time = time.time()
         self._is_paused = False
     
