@@ -5650,31 +5650,11 @@ class MainWindow(QMainWindow):
         
         right_layout.addWidget(scan_group)
         
-        # ★ 남은 주문 요약 버튼
-        summary_btn_layout = QHBoxLayout()
-        self.remaining_summary_btn = QPushButton("📋 남은 주문 요약")
-        self.remaining_summary_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FF9800;
-                color: white;
-                font-weight: bold;
-                padding: 8px 16px;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #F57C00;
-            }
-        """)
-        self.remaining_summary_btn.clicked.connect(self._show_remaining_summary)
-        summary_btn_layout.addWidget(self.remaining_summary_btn)
-        summary_btn_layout.addStretch()
-        right_layout.addLayout(summary_btn_layout)
-        
-        # 탭으로 구성별/제품별 구분
+        # 탭으로 구성별/제품별/송장별 구분
         from PySide6.QtWidgets import QTabWidget
         self.summary_tabs = QTabWidget()
         
-        # 탭1: 구성별 요약
+        # 탭1: 구성별 요약 (카드 형식)
         self.combo_scroll = QScrollArea()
         self.combo_scroll.setWidgetResizable(True)
         self.combo_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -5688,19 +5668,79 @@ class MainWindow(QMainWindow):
         
         self.summary_tabs.addTab(self.combo_scroll, "구성별")
         
-        # 탭2: 제품별 요약
+        # 탭2: 제품별 요약 (테이블 형식 - 로케이션 포함)
+        product_tab = QWidget()
+        product_layout = QVBoxLayout(product_tab)
+        product_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # 제품별 요약 헤더
+        self.product_summary_header = QLabel("📦 남은 제품: 0종 / 0개")
+        self.product_summary_header.setStyleSheet("font-size: 12px; font-weight: bold; color: #2E7D32; padding: 5px;")
+        product_layout.addWidget(self.product_summary_header)
+        
+        # 제품별 테이블
+        self.product_table = QTableWidget()
+        self.product_table.setColumnCount(5)
+        self.product_table.setHorizontalHeaderLabels(["제품명", "바코드", "로케이션", "남은", "합계"])
+        self.product_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.product_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        self.product_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.product_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self.product_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
+        self.product_table.setColumnWidth(1, 100)
+        self.product_table.setColumnWidth(2, 70)
+        self.product_table.setColumnWidth(3, 45)
+        self.product_table.setColumnWidth(4, 45)
+        self.product_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.product_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.product_table.setAlternatingRowColors(True)
+        self.product_table.verticalHeader().setDefaultSectionSize(28)
+        product_layout.addWidget(self.product_table)
+        
+        self.summary_tabs.addTab(product_tab, "제품별")
+        
+        # 탭3: 송장별 요약 (테이블 형식)
+        tracking_tab = QWidget()
+        tracking_layout = QVBoxLayout(tracking_tab)
+        tracking_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # 송장별 요약 헤더
+        self.tracking_summary_header = QLabel("📋 남은 송장: 0건 / 0개")
+        self.tracking_summary_header.setStyleSheet("font-size: 12px; font-weight: bold; color: #1565C0; padding: 5px;")
+        tracking_layout.addWidget(self.tracking_summary_header)
+        
+        # 송장별 테이블
+        self.tracking_table = QTableWidget()
+        self.tracking_table.setColumnCount(6)
+        self.tracking_table.setHorizontalHeaderLabels(["송장번호", "제품", "바코드", "로케이션", "남은", "합계"])
+        self.tracking_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.tracking_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tracking_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.tracking_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self.tracking_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
+        self.tracking_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Fixed)
+        self.tracking_table.setColumnWidth(0, 100)
+        self.tracking_table.setColumnWidth(2, 90)
+        self.tracking_table.setColumnWidth(3, 60)
+        self.tracking_table.setColumnWidth(4, 40)
+        self.tracking_table.setColumnWidth(5, 40)
+        self.tracking_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.tracking_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.tracking_table.setAlternatingRowColors(True)
+        self.tracking_table.verticalHeader().setDefaultSectionSize(25)
+        tracking_layout.addWidget(self.tracking_table)
+        
+        self.summary_tabs.addTab(tracking_tab, "송장별")
+        
+        # 기존 제품별 스크롤 영역 (호환성 유지 - 숨김)
         self.product_scroll = QScrollArea()
         self.product_scroll.setWidgetResizable(True)
-        self.product_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.product_scroll.setStyleSheet("QScrollArea { border: none; background-color: #f5f5f5; }")
-        
         self.product_container = QWidget()
         self.product_grid = QVBoxLayout(self.product_container)
         self.product_grid.setSpacing(5)
         self.product_grid.setAlignment(Qt.AlignTop)
         self.product_scroll.setWidget(self.product_container)
-        
-        self.summary_tabs.addTab(self.product_scroll, "제품별")
+        self.product_scroll.hide()  # 숨김 처리
         
         right_layout.addWidget(self.summary_tabs)
         
@@ -5781,6 +5821,11 @@ class MainWindow(QMainWindow):
     
     def _show_remaining_summary(self):
         """남은 주문 요약 다이얼로그 표시"""
+        # 차수 선택 여부 체크
+        if not hasattr(self, '_shipment_session_id') or self._shipment_session_id <= 0:
+            QMessageBox.warning(self, "경고", "먼저 차수를 선택해주세요.")
+            return
+        
         if self.excel_loader.df is None:
             QMessageBox.warning(self, "경고", "먼저 엑셀 파일을 로드하세요.")
             return
@@ -5923,6 +5968,163 @@ class MainWindow(QMainWindow):
                 remaining_item.setBackground(QColor("#FFCDD2"))
                 remaining_item.setFont(QFont("Arial", 10, QFont.Bold))
             table.setItem(row, 7, remaining_item)
+        
+        layout.addWidget(table)
+        
+        # 하단 버튼
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        close_btn = QPushButton("닫기")
+        close_btn.setMinimumWidth(100)
+        close_btn.clicked.connect(dialog.accept)
+        btn_layout.addWidget(close_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        dialog.exec()
+    
+    def _show_remaining_product_summary(self):
+        """남은 제품 요약 다이얼로그 표시 (바코드별 합산)"""
+        # 차수 선택 여부 체크
+        if not hasattr(self, '_shipment_session_id') or self._shipment_session_id <= 0:
+            QMessageBox.warning(self, "경고", "먼저 차수를 선택해주세요.")
+            return
+        
+        if self.excel_loader.df is None:
+            QMessageBox.warning(self, "경고", "먼저 엑셀 파일을 로드하세요.")
+            return
+        
+        # 남은 항목 가져오기
+        pending = self.excel_loader.get_all_pending()
+        if pending.empty:
+            QMessageBox.information(self, "완료", "모든 제품이 처리되었습니다!")
+            return
+        
+        # 바코드별로 그룹화하여 합산
+        pending['remaining'] = pending['qty'] - pending['scanned_qty']
+        
+        # 그룹화 (바코드 기준)
+        agg_dict = {
+            'product_name': 'first',
+            'option_name': 'first',
+            'qty': 'sum',
+            'scanned_qty': 'sum',
+            'remaining': 'sum'
+        }
+        if 'location' in pending.columns:
+            agg_dict['location'] = 'first'
+        
+        grouped = pending.groupby('barcode').agg(agg_dict).reset_index()
+        grouped = grouped.sort_values('remaining', ascending=False)  # 남은 수량 많은 순
+        
+        # 다이얼로그 생성
+        dialog = QDialog(self)
+        dialog.setWindowTitle("📦 남은 제품 요약")
+        dialog.setMinimumSize(800, 500)
+        dialog.setModal(True)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # 상단 요약 정보
+        summary_frame = QFrame()
+        summary_frame.setStyleSheet("""
+            QFrame {
+                background-color: #E8F5E9;
+                border-radius: 8px;
+                padding: 10px;
+            }
+        """)
+        summary_layout = QHBoxLayout(summary_frame)
+        
+        # 남은 제품 종류
+        remaining_products = len(grouped)
+        products_label = QLabel(f"📦 남은 제품: {remaining_products}종")
+        products_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2E7D32;")
+        summary_layout.addWidget(products_label)
+        
+        summary_layout.addSpacing(30)
+        
+        # 남은 총 수량
+        remaining_qty = int(grouped['remaining'].sum())
+        qty_label = QLabel(f"📊 남은 수량: {remaining_qty}개")
+        qty_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #E65100;")
+        summary_layout.addWidget(qty_label)
+        
+        summary_layout.addStretch()
+        layout.addWidget(summary_frame)
+        
+        # 테이블
+        table = QTableWidget()
+        table.setColumnCount(7)
+        table.setHorizontalHeaderLabels([
+            "제품명", "옵션명", "바코드", "로케이션", "필요", "스캔", "남은"
+        ])
+        
+        # 칼럼 너비 설정
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        header.setSectionResizeMode(3, QHeaderView.Fixed)
+        header.setSectionResizeMode(4, QHeaderView.Fixed)
+        header.setSectionResizeMode(5, QHeaderView.Fixed)
+        header.setSectionResizeMode(6, QHeaderView.Fixed)
+        table.setColumnWidth(2, 120)
+        table.setColumnWidth(3, 80)
+        table.setColumnWidth(4, 50)
+        table.setColumnWidth(5, 50)
+        table.setColumnWidth(6, 50)
+        
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        
+        table.setRowCount(len(grouped))
+        
+        for row, (_, item) in enumerate(grouped.iterrows()):
+            # 제품명
+            product_name = str(item['product_name']) if pd.notna(item['product_name']) else ''
+            table.setItem(row, 0, QTableWidgetItem(product_name))
+            
+            # 옵션명
+            option_name = str(item['option_name']) if pd.notna(item['option_name']) else ''
+            table.setItem(row, 1, QTableWidgetItem(option_name))
+            
+            # 바코드
+            barcode = str(item['barcode']) if pd.notna(item['barcode']) else ''
+            barcode_item = QTableWidgetItem(barcode)
+            barcode_item.setFont(QFont("Consolas", 10))
+            table.setItem(row, 2, barcode_item)
+            
+            # 로케이션
+            location = str(item.get('location', '')) if pd.notna(item.get('location')) else ''
+            location_item = QTableWidgetItem(location)
+            location_item.setTextAlignment(Qt.AlignCenter)
+            if location:
+                location_item.setBackground(QColor("#FFF9C4"))
+            table.setItem(row, 3, location_item)
+            
+            # 필요수량
+            qty = int(item['qty']) if pd.notna(item['qty']) else 0
+            qty_item = QTableWidgetItem(str(qty))
+            qty_item.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row, 4, qty_item)
+            
+            # 스캔수량
+            scanned = int(item['scanned_qty']) if pd.notna(item['scanned_qty']) else 0
+            scanned_item = QTableWidgetItem(str(scanned))
+            scanned_item.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row, 5, scanned_item)
+            
+            # 남은수량
+            remaining = int(item['remaining']) if pd.notna(item['remaining']) else 0
+            remaining_item = QTableWidgetItem(str(remaining))
+            remaining_item.setTextAlignment(Qt.AlignCenter)
+            if remaining > 0:
+                remaining_item.setBackground(QColor("#FFCDD2"))
+                remaining_item.setFont(QFont("Arial", 10, QFont.Bold))
+            table.setItem(row, 6, remaining_item)
         
         layout.addWidget(table)
         
@@ -7948,9 +8150,44 @@ class MainWindow(QMainWindow):
                 for col in range(7):  # BIN 컬럼 제외
                     self.detail_table.item(row, col).setBackground(QColor("#E8F5E9"))
     
+    def _clear_summary_tabs(self, message: str = ""):
+        """모든 요약 탭 비우기"""
+        # 구성별 카드 비우기
+        while self.summary_grid.count():
+            item = self.summary_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        if message:
+            msg_label = QLabel(message)
+            msg_label.setAlignment(Qt.AlignCenter)
+            msg_label.setStyleSheet("font-size: 14px; color: #FF9800; padding: 20px;")
+            self.summary_grid.addWidget(msg_label)
+        
+        # 제품별 테이블 비우기
+        self.product_table.setRowCount(0)
+        self.product_summary_header.setText("📦 남은 제품: -")
+        
+        # 송장별 테이블 비우기
+        self.tracking_table.setRowCount(0)
+        self.tracking_summary_header.setText("📋 남은 송장: -")
+        
+        # 기존 제품별 카드도 비우기
+        while self.product_grid.count():
+            item = self.product_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+    
     def _update_summary_table(self):
-        """요약 카드 업데이트 (구성별 + 제품별)"""
+        """요약 카드 업데이트 (구성별 + 제품별 + 송장별)"""
+        # ★ 차수 선택 여부 체크
+        if not hasattr(self, '_shipment_session_id') or self._shipment_session_id <= 0:
+            # 차수 미선택 시 모든 요약 탭 비우기
+            self._clear_summary_tabs("⚠️ 차수를 먼저 선택해주세요")
+            return
+        
         if self.excel_loader.df is None:
+            self._clear_summary_tabs("⚠️ 엑셀 파일을 먼저 로드해주세요")
             return
         
         df = self.excel_loader.df
@@ -7988,7 +8225,13 @@ class MainWindow(QMainWindow):
                 self.summary_grid.addWidget(card)
             self.summary_grid.addStretch()
         
-        # === 제품별 요약 업데이트 ===
+        # === 제품별 테이블 업데이트 ===
+        self._update_product_table(pending)
+        
+        # === 송장별 테이블 업데이트 ===
+        self._update_tracking_table(pending)
+        
+        # === 기존 제품별 카드 업데이트 (호환성 유지) ===
         while self.product_grid.count():
             item = self.product_grid.takeAt(0)
             if item.widget():
@@ -8032,6 +8275,156 @@ class MainWindow(QMainWindow):
         
         # 남은 수량 내림차순 정렬
         return sorted(product_summary.values(), key=lambda x: -x['remaining'])
+    
+    def _update_product_table(self, pending):
+        """제품별 테이블 업데이트 (바코드별 합산)"""
+        if pending.empty:
+            self.product_table.setRowCount(0)
+            self.product_summary_header.setText("📦 남은 제품: 0종 / 0개")
+            return
+        
+        # 바코드별로 그룹화하여 합산
+        pending = pending.copy()
+        pending['remaining'] = pending['qty'] - pending['scanned_qty']
+        
+        agg_dict = {
+            'product_name': 'first',
+            'option_name': 'first',
+            'qty': 'sum',
+            'remaining': 'sum'
+        }
+        if 'location' in pending.columns:
+            agg_dict['location'] = 'first'
+        
+        grouped = pending.groupby('barcode').agg(agg_dict).reset_index()
+        grouped = grouped.sort_values('remaining', ascending=False)
+        
+        # 헤더 업데이트
+        total_remaining = int(grouped['remaining'].sum())
+        self.product_summary_header.setText(f"📦 남은 제품: {len(grouped)}종 / {total_remaining}개")
+        
+        # 테이블 업데이트
+        self.product_table.setRowCount(len(grouped))
+        
+        for row, (_, item) in enumerate(grouped.iterrows()):
+            # 제품명 + 옵션명
+            product_name = str(item['product_name']) if pd.notna(item['product_name']) else ''
+            option_name = str(item['option_name']) if pd.notna(item['option_name']) else ''
+            display_name = product_name
+            if option_name and option_name != 'nan':
+                display_name += f" ({option_name})"
+            name_item = QTableWidgetItem(display_name)
+            name_item.setToolTip(display_name)  # 긴 이름은 툴팁으로
+            self.product_table.setItem(row, 0, name_item)
+            
+            # 바코드
+            barcode = str(item['barcode']) if pd.notna(item['barcode']) else ''
+            barcode_item = QTableWidgetItem(barcode)
+            barcode_item.setFont(QFont("Consolas", 9))
+            self.product_table.setItem(row, 1, barcode_item)
+            
+            # 로케이션
+            location = str(item.get('location', '')) if pd.notna(item.get('location')) else ''
+            location_item = QTableWidgetItem(location)
+            location_item.setTextAlignment(Qt.AlignCenter)
+            if location:
+                location_item.setBackground(QColor("#FFF9C4"))
+            self.product_table.setItem(row, 2, location_item)
+            
+            # 남은수량
+            remaining = int(item['remaining']) if pd.notna(item['remaining']) else 0
+            remaining_item = QTableWidgetItem(str(remaining))
+            remaining_item.setTextAlignment(Qt.AlignCenter)
+            if remaining >= 10:
+                remaining_item.setBackground(QColor("#FFCDD2"))
+                remaining_item.setForeground(QColor("#C62828"))
+            elif remaining >= 5:
+                remaining_item.setBackground(QColor("#FFE0B2"))
+            remaining_item.setFont(QFont("Arial", 9, QFont.Bold))
+            self.product_table.setItem(row, 3, remaining_item)
+            
+            # 합계
+            total_qty = int(item['qty']) if pd.notna(item['qty']) else 0
+            total_item = QTableWidgetItem(str(total_qty))
+            total_item.setTextAlignment(Qt.AlignCenter)
+            self.product_table.setItem(row, 4, total_item)
+    
+    def _update_tracking_table(self, pending):
+        """송장별 테이블 업데이트"""
+        if pending.empty:
+            self.tracking_table.setRowCount(0)
+            self.tracking_summary_header.setText("📋 남은 송장: 0건 / 0개")
+            return
+        
+        # 남은 수량 계산
+        pending = pending.copy()
+        pending['remaining'] = pending['qty'] - pending['scanned_qty']
+        
+        # 총 송장 수와 수량
+        total_tracking = pending['tracking_no'].nunique()
+        total_remaining = int(pending['remaining'].sum())
+        self.tracking_summary_header.setText(f"📋 남은 송장: {total_tracking}건 / {total_remaining}개")
+        
+        # 송장별로 정렬
+        pending_sorted = pending.sort_values(['tracking_no', 'barcode'])
+        
+        self.tracking_table.setRowCount(len(pending_sorted))
+        
+        current_tracking = None
+        for row, (_, item) in enumerate(pending_sorted.iterrows()):
+            tracking_no = str(item['tracking_no'])
+            
+            # 송장번호 (같은 송장은 한 번만 표시)
+            if tracking_no != current_tracking:
+                tracking_item = QTableWidgetItem(tracking_no)
+                tracking_item.setFont(QFont("Consolas", 9, QFont.Bold))
+                tracking_item.setBackground(QColor("#E8EAF6"))
+                current_tracking = tracking_no
+            else:
+                tracking_item = QTableWidgetItem("")
+            self.tracking_table.setItem(row, 0, tracking_item)
+            
+            # 제품명 + 옵션명
+            product_name = str(item['product_name']) if pd.notna(item['product_name']) else ''
+            option_name = str(item['option_name']) if pd.notna(item['option_name']) else ''
+            display_name = product_name
+            if option_name and option_name != 'nan':
+                display_name += f" ({option_name})"
+            # 긴 이름 줄임
+            if len(display_name) > 25:
+                display_name = display_name[:22] + "..."
+            name_item = QTableWidgetItem(display_name)
+            name_item.setToolTip(f"{product_name} ({option_name})")
+            self.tracking_table.setItem(row, 1, name_item)
+            
+            # 바코드
+            barcode = str(item['barcode']) if pd.notna(item['barcode']) else ''
+            barcode_item = QTableWidgetItem(barcode)
+            barcode_item.setFont(QFont("Consolas", 8))
+            self.tracking_table.setItem(row, 2, barcode_item)
+            
+            # 로케이션
+            location = str(item.get('location', '')) if pd.notna(item.get('location')) else ''
+            location_item = QTableWidgetItem(location)
+            location_item.setTextAlignment(Qt.AlignCenter)
+            if location:
+                location_item.setBackground(QColor("#FFF9C4"))
+            self.tracking_table.setItem(row, 3, location_item)
+            
+            # 남은수량
+            remaining = int(item['remaining']) if pd.notna(item['remaining']) else 0
+            remaining_item = QTableWidgetItem(str(remaining))
+            remaining_item.setTextAlignment(Qt.AlignCenter)
+            if remaining > 0:
+                remaining_item.setBackground(QColor("#FFCDD2"))
+                remaining_item.setFont(QFont("Arial", 9, QFont.Bold))
+            self.tracking_table.setItem(row, 4, remaining_item)
+            
+            # 합계 (필요수량)
+            qty = int(item['qty']) if pd.notna(item['qty']) else 0
+            qty_item = QTableWidgetItem(str(qty))
+            qty_item.setTextAlignment(Qt.AlignCenter)
+            self.tracking_table.setItem(row, 5, qty_item)
     
     def _create_product_card(self, prod_info):
         """제품별 카드 생성"""
