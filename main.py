@@ -55,8 +55,8 @@ def update_splash(text):
     try:
         import pyi_splash
         pyi_splash.update_text(text)
-    except ImportError:
-        pass  # 개발 환경에서는 무시
+    except (ImportError, RuntimeError):
+        pass  # 개발 환경 또는 스플래시 미초기화 시 무시
 
 
 def close_splash():
@@ -64,8 +64,8 @@ def close_splash():
     try:
         import pyi_splash
         pyi_splash.close()
-    except ImportError:
-        pass  # 개발 환경에서는 무시
+    except (ImportError, RuntimeError):
+        pass  # 개발 환경 또는 스플래시 미초기화 시 무시
 
 
 def main():
