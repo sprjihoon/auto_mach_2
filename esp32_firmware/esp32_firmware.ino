@@ -85,9 +85,9 @@ Adafruit_NeoPixel pixels(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 Preferences preferences;
 
 // ===== WiFi 설정 (NVS에서 로드) =====
-// ★ 기본값 - SmartConfig로 자동 설정되면 NVS에 저장됨
-String wifiSSID = "";                  // WiFi 이름 (빈값 = SmartConfig 사용)
-String wifiPassword = "";              // WiFi 비밀번호
+// ★ 기본값 - 첫 플래시/NVS 비어있을 때 사용. 설정 페이지·PC WiFi 일괄로 차후 변경 가능
+String wifiSSID = "spring303";        // 기본 WiFi 이름
+String wifiPassword = "wkdwlgns";     // 기본 비밀번호
 String wsHost = "";                    // PC IP (자동 발견)
 int wsPort = 8765;
 int deviceNumber = 0;  // 장치 번호 (0=자동, 1~99=수동 지정)
