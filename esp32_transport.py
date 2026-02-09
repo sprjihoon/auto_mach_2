@@ -398,6 +398,18 @@ class Esp32Transport(QObject):
             "type": "off",
             "bin": bin_id
         })
+
+    def send_set_wifi(self, device_id: str, ssid: str, password: str = "") -> bool:
+        """
+        WiFi 일괄 설정 전송 (저장 후 ESP32 재부팅)
+        
+        { type:"set_wifi", ssid:"...", password:"..." }
+        """
+        return self.send_to_device(device_id, {
+            "type": "set_wifi",
+            "ssid": ssid,
+            "password": password
+        })
     
     def send_display_to_bin(self, bin_id: str, mode: str, color: str, qty: int, 
                             device_registry=None) -> bool:

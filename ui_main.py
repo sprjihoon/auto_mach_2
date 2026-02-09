@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QFileDialog, QGroupBox, QSplitter,
     QHeaderView, QMessageBox, QFrame, QCheckBox, QDialog,
     QScrollArea, QGridLayout, QListWidget, QListWidgetItem,
-    QRadioButton, QButtonGroup, QComboBox, QTabWidget, QSpinBox
+    QRadioButton, QButtonGroup, QComboBox, QTabWidget, QSpinBox,
+    QFormLayout, QDialogButtonBox
 )
 from PySide6.QtCore import Qt, Slot, QTimer, QPropertyAnimation, QEasingCurve, Signal
 from PySide6.QtGui import QFont, QColor, QPalette, QIcon
@@ -2093,6 +2094,11 @@ class MainWindow(QMainWindow):
         self.esp32_test_all_btn.clicked.connect(self._on_esp32_test_all_devices)
         device_btn_row.addWidget(self.esp32_test_all_btn)
         
+        self.esp32_set_wifi_all_btn = QPushButton("📶 WiFi 일괄 설정")
+        self.esp32_set_wifi_all_btn.setToolTip("연결된 모든 ESP32에 같은 WiFi(SSID/비밀번호)를 한 번에 전송. 재부팅 후 새 WiFi로 연결됩니다.")
+        self.esp32_set_wifi_all_btn.clicked.connect(self._on_esp32_set_wifi_all)
+        device_btn_row.addWidget(self.esp32_set_wifi_all_btn)
+        
         device_btn_row.addStretch()
         device_layout.addLayout(device_btn_row)
         
@@ -2262,6 +2268,58 @@ class MainWindow(QMainWindow):
             self.esp32_transport.send_command(device_id, {"cmd": "test"})
         
         self._add_esp32_log(f"테스트 신호 전송: {len(devices)}대 장치")
+    
+    def _on_esp32_set_wifi_all(self):
+        """연결된 모든 ESP32에 WiFi(SSID/비밀번호) 일괄 설정 - 100대여도 한 번에"""
+        connected = self.esp32_transport.get_connected_devices()
+        if not connected:
+            QMessageBox.warning(self, "경고", "연결된 ESP32 장치가 없습니다.\n서버를 시작한 뒤 장치가 연결된 상태에서 사용하세요.")
+            return
+        
+        dlg = QDialog(self)
+        dlg.setWindowTitle("WiFi 일괄 설정")
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        ssid_edit = QLineEdit()
+        ssid_edit.setPlaceholderText("새 WiFi 이름 (SSID)")
+        ssid_edit.setMinimumWidth(280)
+        form.addRow("WiFi 이름 (SSID):", ssid_edit)
+        pw_edit = QLineEdit()
+        pw_edit.setPlaceholderText("비밀번호 (없으면 비움)")
+        pw_edit.setEchoMode(QLineEdit.Password)
+        form.addRow("비밀번호:", pw_edit)
+        layout.addLayout(form)
+        hint = QLabel("연결된 모든 장치에 동일한 WiFi를 전송합니다.\n저장 후 각 장치가 자동 재부팅하며 새 WiFi로 연결됩니다.")
+        hint.setStyleSheet("color: #666; font-size: 11px;")
+        layout.addWidget(hint)
+        bbox = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bbox.accepted.connect(dlg.accept)
+        bbox.rejected.connect(dlg.reject)
+        layout.addWidget(bbox)
+        
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        
+        ssid = ssid_edit.text().strip()
+        if not ssid:
+            QMessageBox.warning(self, "경고", "WiFi 이름(SSID)을 입력해주세요.")
+            return
+        
+        password = pw_edit.text().strip()
+        success = 0
+        for device_id in connected:
+            if self.esp32_transport.send_set_wifi(device_id, ssid, password):
+                success += 1
+                self._add_esp32_log(f"[WiFi 일괄] {device_id} 전송 완료")
+            else:
+                self._add_esp32_log(f"[WiFi 일괄] {device_id} 전송 실패")
+        
+        QMessageBox.information(
+            self, "WiFi 일괄 설정 완료",
+            f"{success}개 장치에 WiFi 설정을 전송했습니다.\n\n"
+            f"각 ESP32가 자동으로 재부팅한 뒤 새 WiFi({ssid})로 연결됩니다.\n"
+            f"서버 IP는 재부팅 후 브로드캐스트로 자동 수신됩니다."
+        )
     
     def _add_esp32_log(self, message: str):
         """ESP32 로그 추가"""

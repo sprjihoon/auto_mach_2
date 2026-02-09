@@ -93,13 +93,14 @@ int wsPort = 8765;
 int deviceNumber = 0;  // 장치 번호 (0=자동, 1~99=수동 지정)
 
 // ===== 서버 자동 발견 설정 =====
-#define DISCOVERY_PORT 8764           // UDP 브로드캐스트 수신 포트
-#define DISCOVERY_TIMEOUT 30000       // 자동 발견 타임아웃 (30초)
+#define DISCOVERY_PORT 8764           // UDP 브로드캐스트 수신 포트 (서버 PC가 이 포트로 IP 전송)
+#define DISCOVERY_TIMEOUT_SAVED 8000  // 저장된 IP 있을 때 대기 (8초) - 서버 PC IP 수신 시 사용
+#define DISCOVERY_TIMEOUT_NONE 20000  // 저장된 IP 없을 때 대기 (20초)
 bool autoDiscoveryEnabled = true;     // 자동 발견 활성화
 
 // ===== SmartConfig 설정 =====
-#define SMARTCONFIG_TIMEOUT 120000    // SmartConfig 타임아웃 (2분)
-bool useSmartConfig = true;           // SmartConfig 사용 여부
+#define SMARTCONFIG_TIMEOUT 25000     // SmartConfig 타임아웃 (25초, 실패 시 자동 설정 AP)
+bool useSmartConfig = true;           // SmartConfig 사용 여부 (false면 WiFi 없을 때 바로 설정 AP)
 
 // ===== 상태 변수 =====
 String deviceId = "";
@@ -107,6 +108,7 @@ String bindedBinId = "";
 String currentMode = "";
 int currentQty = 0;
 bool isConnected = false;
+unsigned long connectAttemptMillis = 0;  // 연결 시도/끊김 시각 (60초 후 재발견용)
 bool buttonPressed = false;
 unsigned long lastButtonTime = 0;
 unsigned long buttonPressStart = 0;
@@ -504,7 +506,7 @@ String getSetupPage() {
     html += deviceId;
     html += R"rawliteral(</div>
             
-            <form action="/save" method="POST">
+            <form action="/save" method="POST" novalidate>
                 <div class="section-title">WiFi Connection</div>
                 
                 <div class="form-group">
@@ -533,11 +535,14 @@ String getSetupPage() {
                 <div class="section-title">Server Connection</div>
                 
                 <div class="form-group">
-                    <label>PC IP Address</label>
-                    <input type="text" name="host" value=")rawliteral";
+                    <label>PC IP Address (optional)</label>
+                    <div style="display: flex; gap: 8px; margin-bottom: 5px;">
+                        <input type="text" name="host" id="hostInput" value=")rawliteral";
     html += wsHost;
-    html += R"rawliteral(" required placeholder="e.g. 192.168.0.100">
-                    <div class="hint">Run ipconfig on PC to find</div>
+    html += R"rawliteral(" placeholder="Leave empty (recommended)" style="flex: 1;">
+                        <button type="button" class="scan-btn" id="useMyIpBtn" onclick="useMyIp()" style="flex: 0 0 auto; padding: 14px 16px;">Use My IP</button>
+                    </div>
+                    <div class="hint"><b>Leave empty (recommended)</b> = Server IP received automatically when you start AutoMach server on PC. No need to set per board.</div>
                 </div>
                 
                 <div class="form-group">
@@ -616,6 +621,18 @@ String getSetupPage() {
             }
         }
         
+        function useMyIp() {
+            const btn = document.getElementById('useMyIpBtn');
+            const input = document.getElementById('hostInput');
+            btn.disabled = true;
+            btn.textContent = '...';
+            fetch('/client-ip')
+                .then(r => r.json())
+                .then(data => { input.value = data.ip || ''; })
+                .catch(() => {})
+                .finally(() => { btn.disabled = false; btn.textContent = 'Use My IP'; });
+        }
+        
         document.querySelector('form').addEventListener('submit', function(e) {
             if (manualMode) {
                 const manualSsid = document.getElementById('manualSsid').value;
@@ -659,6 +676,7 @@ String getSavedPage() {
         <p>ESP32 will reboot now.<br>Connecting to new WiFi...</p>
         <div class="countdown" id="countdown">3</div>
         <p style="font-size: 12px; color: #888;">This hotspot will disappear</p>
+        <p style="font-size: 12px; color: #667eea; margin-top: 15px;">If PC IP was left empty: start AutoMach server on PC and ESP32 will receive server IP automatically.</p>
     </div>
     <script>
         let count = 3;
@@ -706,6 +724,13 @@ void handleSave() {
     ESP.restart();
 }
 
+// ===== 연결한 기기(클라이언트) IP 반환 (설정 페이지 자동 입력용) =====
+void handleClientIp() {
+    WiFiClient client = server.client();
+    String ip = client.remoteIP().toString();
+    server.send(200, "application/json", "{\"ip\":\"" + ip + "\"}");
+}
+
 // ===== WiFi 스캔 핸들러 =====
 void handleScan() {
     Serial.println("WiFi 스캔 시작...");
@@ -749,6 +774,7 @@ void startSetupMode() {
     server.on("/", handleRoot);
     server.on("/save", HTTP_POST, handleSave);
     server.on("/scan", HTTP_GET, handleScan);
+    server.on("/client-ip", HTTP_GET, handleClientIp);
     server.begin();
     
     Serial.println("Web server started!");
@@ -874,17 +900,17 @@ bool startSmartConfig() {
     return false;
 }
 
-// ===== 서버 자동 발견 (UDP) =====
-bool discoverServer() {
+// ===== 서버 자동 발견 (UDP) - 서버 PC가 브로드캐스트하는 IP 수신 =====
+// timeoutMs: 이 시간 동안 브로드캐스트 대기. 받으면 true, 못 받으면 false
+bool discoverServer(uint32_t timeoutMs) {
     if (!autoDiscoveryEnabled) return false;
-    if (wsHost.length() > 0) return true;  // 이미 설정됨
     
-    Serial.println("[Discovery] Looking for AutoMach server...");
+    Serial.printf("[Discovery] Listening for server IP (timeout %u sec)...\n", (unsigned int)(timeoutMs / 1000));
     
     // TFT 표시
     tftClear();
-    tftDrawCentered("SEARCHING", 50, COLOR_INFO, 2);
-    tftDrawCentered("for PC server...", 80, COLOR_TEXT, 2);
+    tftDrawCentered("WAIT FOR SERVER", 50, COLOR_INFO, 2);
+    tftDrawCentered("(Start server on PC)", 80, COLOR_TEXT, 1);
     
     WiFiUDP udp;
     udp.begin(DISCOVERY_PORT);
@@ -892,7 +918,7 @@ bool discoverServer() {
     unsigned long startTime = millis();
     char packetBuffer[255];
     
-    while (millis() - startTime < DISCOVERY_TIMEOUT) {
+    while (millis() - startTime < timeoutMs) {
         int packetSize = udp.parsePacket();
         if (packetSize > 0) {
             int len = udp.read(packetBuffer, 254);
@@ -907,7 +933,7 @@ bool discoverServer() {
                         wsHost = packet.substring(9, firstColon);
                         wsPort = packet.substring(firstColon + 1).toInt();
                         
-                        Serial.printf("[Discovery] Found server: %s:%d\n", wsHost.c_str(), wsPort);
+                        Serial.printf("[Discovery] Server IP received: %s:%d\n", wsHost.c_str(), wsPort);
                         
                         tftClear();
                         tftDrawCentered("SERVER FOUND!", 60, COLOR_SUCCESS, 2);
@@ -915,6 +941,7 @@ bool discoverServer() {
                         delay(1000);
                         
                         udp.stop();
+                        saveSettings();  // 받은 IP 저장 (다음 부팅 시 폴백용)
                         return true;
                     }
                 }
@@ -932,7 +959,7 @@ bool discoverServer() {
     }
     
     udp.stop();
-    Serial.println("[Discovery] Server not found (timeout)");
+    Serial.println("[Discovery] No broadcast received (timeout)");
     return false;
 }
 
@@ -1041,6 +1068,7 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
         case WStype_DISCONNECTED:
             Serial.println("[WS] Disconnected");
             isConnected = false;
+            connectAttemptMillis = millis();  // 끊긴 시각 (60초 후 재발견·재시작용)
             
             tftClear();
             tftDrawCentered("DISCONNECTED", 80, COLOR_WARNING, 2);
@@ -1057,6 +1085,7 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
         case WStype_CONNECTED:
             Serial.println("[WS] Connected!");
             isConnected = true;
+            connectAttemptMillis = 0;  // 연결됨 → 재발견 타이머 비활성화
             
             sendHello();
             
@@ -1278,6 +1307,22 @@ void handleMessage(const char* payload) {
         tftDrawCentered("REBOOTING...", 100, TFT_WHITE, 2);
         delay(1000);
         ESP.restart();
+        
+    } else if (msgType == "set_wifi") {
+        // WiFi 일괄 설정 (PC에서 연결된 모든 장치에 한 번에 전송)
+        if (doc.containsKey("ssid")) {
+            wifiSSID = doc["ssid"].as<String>();
+            wifiPassword = doc.containsKey("password") ? doc["password"].as<String>() : "";
+            wsHost = "";  // 서버 IP는 재부팅 후 브로드캐스트로 다시 수신
+            saveSettings();
+            Serial.println("[SetWiFi] Saved. Rebooting...");
+            tft.fillScreen(COLOR_SUCCESS);
+            tftDrawCentered("WiFi UPDATED", 70, TFT_WHITE, 2);
+            tftDrawCentered(wifiSSID.substring(0, 20).c_str(), 110, TFT_WHITE, 2);
+            tftDrawCentered("Rebooting...", 160, TFT_WHITE, 2);
+            delay(2000);
+            ESP.restart();
+        }
     }
 }
 
@@ -1382,6 +1427,12 @@ void showStandby() {
         sprintf(ipStr, "%s", WiFi.localIP().toString().c_str());
         tftDrawCentered(ipStr, 170, TFT_DARKGREY, 1);
     }
+    
+    // WiFi/설정 변경 안내 (BOOT 5초 = 설정 모드)
+    tft.setTextColor(TFT_DARKGREY, COLOR_BG);
+    tft.setTextSize(1);
+    tft.setCursor(25, 218);
+    tft.print("BOOT 5s = WiFi/Setup");
     
     tftDrawStatusBar("STANDBY", TFT_DARKGREY);
     
@@ -1654,7 +1705,21 @@ void setup() {
     // 저장된 설정 로드
     loadSettings();
     
-    // 부팅 시 버튼이 눌려있으면 설정 모드
+    // ★ 첫 부팅(WiFi 미설정): BOOT 버튼 없이 자동으로 설정 AP 진입 → 펌웨어 후 바로 설정 가능
+    if (wifiSSID.length() == 0) {
+        Serial.println("No WiFi - auto setup mode (connect to AutoMach_Setup, no BOOT needed)");
+        tftClear();
+        tftDrawCentered("FIRST SETUP", 50, COLOR_INFO, 2);
+        tftDrawCentered("Connect WiFi:", 90, COLOR_TEXT, 1);
+        tftDrawCentered("AutoMach_Setup", 110, COLOR_TITLE, 2);
+        tftDrawCentered("Then open 192.168.4.1", 140, COLOR_TEXT, 1);
+        tftDrawCentered("(PC IP = leave empty)", 165, TFT_DARKGREY, 1);
+        delay(2000);
+        startSetupMode();
+        return;
+    }
+    
+    // 부팅 시 버튼이 눌려있으면 설정 모드 (WiFi 이미 있을 때 설정 변경용)
     if (digitalRead(BUTTON_PIN) == LOW) {
         Serial.println("Button held during boot - Setup mode!");
         
@@ -1662,7 +1727,6 @@ void setup() {
         tftDrawCentered("Release button", 80, COLOR_WARNING, 2);
         tftDrawCentered("for setup mode", 110, COLOR_WARNING, 2);
         
-        // 버튼 떼기 대기
         while (digitalRead(BUTTON_PIN) == LOW) {
             delay(100);
         }
@@ -1675,27 +1739,29 @@ void setup() {
     // WiFi 연결
     connectWiFi();
     
-    // 설정 모드가 아니면 서버 발견 후 WebSocket 연결
+    // 설정 모드가 아니면 서버 IP 수신(브로드캐스트) 후 WebSocket 연결
     if (!setupMode && WiFi.status() == WL_CONNECTED) {
-        // ★ PC 서버 자동 발견
-        if (wsHost.length() == 0) {
-            if (!discoverServer()) {
-                // 서버 못 찾으면 수동 설정 안내
+        // ★ 부팅 시 항상 서버 PC 브로드캐스트 수신 시도 (서버 시작 시 각 보드에 IP 자동 설정)
+        uint32_t discoveryTimeout = (wsHost.length() > 0) ? DISCOVERY_TIMEOUT_SAVED : DISCOVERY_TIMEOUT_NONE;
+        if (!discoverServer(discoveryTimeout)) {
+            // 브로드캐스트 못 받음
+            if (wsHost.length() == 0) {
+                // 저장된 IP도 없으면 안내 후 재시작
                 tftClear();
-                tftDrawCentered("SERVER NOT", 50, COLOR_WARNING, 2);
-                tftDrawCentered("FOUND", 80, COLOR_WARNING, 2);
-                tftDrawCentered("Start server on PC", 130, COLOR_TEXT, 1);
-                tftDrawCentered("or press BOOT for", 150, COLOR_TEXT, 1);
-                tftDrawCentered("manual setup", 170, COLOR_TEXT, 1);
-                
-                // 5초 대기 후 재시도 또는 설정 모드
+                tftDrawCentered("SERVER NOT FOUND", 50, COLOR_WARNING, 2);
+                tftDrawCentered("Start server on PC", 100, COLOR_TEXT, 1);
+                tftDrawCentered("then restart ESP32", 120, COLOR_TEXT, 1);
+                tftDrawCentered("or BOOT for setup", 150, COLOR_TEXT, 1);
                 delay(5000);
                 ESP.restart();
                 return;
             }
+            // 저장된 IP 있으면 그대로 사용 (PC가 아직 서버 안 켰을 수 있음)
+            Serial.println("[Discovery] Using saved server: " + wsHost + ":" + String(wsPort));
         }
         
         Serial.println("Connecting WebSocket: " + wsHost + ":" + String(wsPort));
+        connectAttemptMillis = millis();  // 연결 시도 시작 시각 (60초 후 재발견용)
         
         webSocket.begin(wsHost.c_str(), wsPort, "/");
         webSocket.onEvent(webSocketEvent);
@@ -1735,6 +1801,15 @@ void loop() {
     
     // WebSocket 처리
     webSocket.loop();
+    
+    // ★ 연결 끊김 60초 경과 시 저장 IP 초기화 후 재시작 → 다음 부팅에 브로드캐스트로 서버 IP 재수신
+    if (!webSocket.isConnected() && connectAttemptMillis > 0 && (millis() - connectAttemptMillis > 60000)) {
+        Serial.println("[Reconnect] No connection 60s - clear saved IP, restart to discover server...");
+        wsHost = "";
+        saveSettings();
+        delay(500);
+        ESP.restart();
+    }
     
     // 터치 처리
     handleTouch();
