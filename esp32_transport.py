@@ -48,7 +48,7 @@ class Esp32Transport(QObject):
     """
     
     # 시그널
-    device_hello = Signal(str)          # device_id (장치 연결)
+    device_hello = Signal(str, str)    # device_id, wifi_ssid (장치 연결, 현재 WiFi SSID)
     device_done = Signal(str, str)      # bin_id, device_id (BIN 완료)
     device_disconnected = Signal(str)   # device_id
     server_started = Signal(int)        # port
@@ -207,12 +207,13 @@ class Esp32Transport(QObject):
                         device_id = data.get("device_id", "unknown")
                         firmware_version = data.get("firmware_version", "unknown")
                         device_ip = data.get("ip", "unknown")
+                        wifi_ssid = data.get("wifi_ssid", "") or ""
                         
                         self._connections[device_id] = websocket
                         self._websocket_to_device[websocket] = device_id
                         
-                        print(f"[ESP32Transport] 장치 연결: {device_id} (v{firmware_version}, {device_ip})")
-                        self.device_hello.emit(device_id)
+                        print(f"[ESP32Transport] 장치 연결: {device_id} (v{firmware_version}, {device_ip}, WiFi: {wifi_ssid or '-'})")
+                        self.device_hello.emit(device_id, wifi_ssid)
                         self.device_version.emit(device_id, firmware_version, device_ip)
                         
                         if self._on_hello_callback:

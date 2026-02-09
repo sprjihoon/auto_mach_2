@@ -24,13 +24,15 @@ class DeviceInfo:
     connected: bool = False     # 연결 상태
     last_seen: Optional[datetime] = None  # 마지막 통신 시간
     websocket: object = None    # WebSocket 연결 객체
-    
+    wifi_ssid: Optional[str] = None  # 현재 연결된 WiFi SSID (hello 수신 시 갱신)
+
     def to_dict(self) -> dict:
         return {
             "device_id": self.device_id,
             "bin_id": self.bin_id,
             "connected": self.connected,
-            "last_seen": self.last_seen.isoformat() if self.last_seen else None
+            "last_seen": self.last_seen.isoformat() if self.last_seen else None,
+            "wifi_ssid": self.wifi_ssid
         }
 
 
@@ -70,14 +72,15 @@ class DeviceRegistry(QObject):
         """바인딩된 장치 수"""
         return sum(1 for d in self._devices.values() if d.bin_id is not None)
     
-    def register_device(self, device_id: str, websocket: object = None) -> DeviceInfo:
+    def register_device(self, device_id: str, websocket: object = None, wifi_ssid: Optional[str] = None) -> DeviceInfo:
         """
         장치 등록 (hello 메시지 수신 시)
-        
+
         Args:
             device_id: ESP32 고유 ID
             websocket: WebSocket 연결 객체
-        
+            wifi_ssid: 현재 연결된 WiFi SSID (hello에 포함된 값)
+
         Returns:
             DeviceInfo 객체
         """
@@ -87,31 +90,36 @@ class DeviceRegistry(QObject):
             device.connected = True
             device.last_seen = datetime.now()
             device.websocket = websocket
+            if wifi_ssid is not None:
+                device.wifi_ssid = wifi_ssid or None
         else:
             # 새 장치 등록
             device = DeviceInfo(
                 device_id=device_id,
                 connected=True,
                 last_seen=datetime.now(),
-                websocket=websocket
+                websocket=websocket,
+                wifi_ssid=wifi_ssid or None
             )
             self._devices[device_id] = device
-        
+
         self.device_connected.emit(device_id)
         return device
     
     def unregister_device(self, device_id: str):
         """
-        장치 연결 해제
+        장치 연결 해제 (고장/끊김 시 BIN도 해제 → 정상 보드에만 BIN 배정 가능)
         
         Args:
             device_id: ESP32 고유 ID
         """
         if device_id in self._devices:
             device = self._devices[device_id]
+            # 연결 끊긴 보드는 BIN 해제 → 해당 BIN 번호가 비어서 다른(정상) 보드에 재배정 가능
+            self.unbind_device(device_id)
             device.connected = False
             device.websocket = None
-            
+
             self.device_disconnected.emit(device_id)
     
     def bind_device(self, device_id: str, bin_id: str) -> bool:
@@ -172,7 +180,7 @@ class DeviceRegistry(QObject):
     
     def auto_bind_device(self, device_id: str) -> Optional[str]:
         """
-        장치 자동 바인딩 (순차적 BIN 할당)
+        장치 자동 바인딩 (비어 있는 가장 작은 BIN 번호 할당 → 고장 보드 끊김 시 번호가 비어 정상 보드에 맞게 배정)
         
         Args:
             device_id: ESP32 고유 ID
@@ -183,21 +191,17 @@ class DeviceRegistry(QObject):
         if not self._auto_bind_enabled:
             return None
         
-        # 이미 바인딩된 경우 건너뛰기
+        # 이미 바인딩된 경우 건너뛰기 (재연결 시 기존 BIN 유지)
         if device_id in self._devices and self._devices[device_id].bin_id:
             return self._devices[device_id].bin_id
         
-        # 다음 BIN 할당
-        bin_id = f"BIN-{self._next_auto_bin_number:02d}"
-        
-        # 중복 확인
-        while bin_id in self._bin_device_map:
-            self._next_auto_bin_number += 1
-            bin_id = f"BIN-{self._next_auto_bin_number:02d}"
-        
-        if self.bind_device(device_id, bin_id):
-            self._next_auto_bin_number += 1
-            return bin_id
+        # 비어 있는 가장 작은 BIN 번호 할당 (끊긴 보드의 BIN이 비었으면 그 번호 재사용)
+        for n in range(1, 100):
+            bin_id = f"BIN-{n:02d}"
+            if bin_id not in self._bin_device_map:
+                if self.bind_device(device_id, bin_id):
+                    return bin_id
+                break
         
         return None
     

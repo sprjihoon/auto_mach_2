@@ -2065,15 +2065,16 @@ class MainWindow(QMainWindow):
         
         # 장치 테이블
         self.esp32_device_table = QTableWidget()
-        self.esp32_device_table.setColumnCount(4)
-        self.esp32_device_table.setHorizontalHeaderLabels(["장치 ID", "BIN 바인딩", "상태", "연결 시간"])
+        self.esp32_device_table.setColumnCount(5)
+        self.esp32_device_table.setHorizontalHeaderLabels(["장치 ID", "BIN 바인딩", "연결 WiFi", "상태", "연결 시간"])
         self.esp32_device_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.esp32_device_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
-        self.esp32_device_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.esp32_device_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.esp32_device_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self.esp32_device_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
         self.esp32_device_table.setColumnWidth(1, 100)
-        self.esp32_device_table.setColumnWidth(2, 80)
-        self.esp32_device_table.setColumnWidth(3, 120)
+        self.esp32_device_table.setColumnWidth(3, 80)
+        self.esp32_device_table.setColumnWidth(4, 120)
         self.esp32_device_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.esp32_device_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.esp32_device_table.setMinimumHeight(200)
@@ -2095,7 +2096,7 @@ class MainWindow(QMainWindow):
         device_btn_row.addWidget(self.esp32_test_all_btn)
         
         self.esp32_set_wifi_all_btn = QPushButton("📶 WiFi 일괄 설정")
-        self.esp32_set_wifi_all_btn.setToolTip("연결된 모든 ESP32에 같은 WiFi(SSID/비밀번호)를 한 번에 전송. 재부팅 후 새 WiFi로 연결됩니다.")
+        self.esp32_set_wifi_all_btn.setToolTip("연결된 ESP32 중 선택한 보드만 WiFi(SSID/비밀번호) 전송. 맥·BIN 매칭 유지. 재부팅 후 새 WiFi로 연결됩니다.")
         self.esp32_set_wifi_all_btn.clicked.connect(self._on_esp32_set_wifi_all)
         device_btn_row.addWidget(self.esp32_set_wifi_all_btn)
         
@@ -2270,9 +2271,9 @@ class MainWindow(QMainWindow):
         self._add_esp32_log(f"테스트 신호 전송: {len(devices)}대 장치")
     
     def _on_esp32_set_wifi_all(self):
-        """연결된 모든 ESP32에 WiFi(SSID/비밀번호) 일괄 설정 - 100대여도 한 번에"""
-        connected = self.esp32_transport.get_connected_devices()
-        if not connected:
+        """연결된 ESP32 중 선택한 보드에만 WiFi(SSID/비밀번호) 일괄 설정"""
+        devices = self.device_registry.get_connected_devices()
+        if not devices:
             QMessageBox.warning(self, "경고", "연결된 ESP32 장치가 없습니다.\n서버를 시작한 뒤 장치가 연결된 상태에서 사용하세요.")
             return
         
@@ -2289,7 +2290,48 @@ class MainWindow(QMainWindow):
         pw_edit.setEchoMode(QLineEdit.Password)
         form.addRow("비밀번호:", pw_edit)
         layout.addLayout(form)
-        hint = QLabel("연결된 모든 장치에 동일한 WiFi를 전송합니다.\n저장 후 각 장치가 자동 재부팅하며 새 WiFi로 연결됩니다.")
+        
+        # 장치 선택 테이블: [선택] [장치 ID (맥)] [BIN 번호] [연결 WiFi]
+        dev_label = QLabel("대상 장치 선택 (맥·BIN 매칭 유지, 선택한 보드에만 WiFi 전송):")
+        dev_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(dev_label)
+        dev_table = QTableWidget()
+        dev_table.setColumnCount(4)
+        dev_table.setHorizontalHeaderLabels(["선택", "장치 ID (맥)", "BIN 번호", "연결 WiFi"])
+        dev_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        dev_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        dev_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        dev_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        dev_table.setColumnWidth(2, 90)
+        dev_table.setRowCount(len(devices))
+        checkboxes = []
+        for row, dev in enumerate(devices):
+            cb = QCheckBox()
+            cb.setChecked(True)
+            checkboxes.append((cb, dev.device_id))
+            dev_table.setCellWidget(row, 0, cb)
+            dev_table.setItem(row, 1, QTableWidgetItem(dev.device_id))
+            bin_text = dev.bin_id or "미할당"
+            dev_table.setItem(row, 2, QTableWidgetItem(bin_text))
+            wifi_text = (dev.wifi_ssid or "").strip() or "-"
+            dev_table.setItem(row, 3, QTableWidgetItem(wifi_text))
+        dev_table.setMinimumHeight(min(220, 40 + len(devices) * 32))
+        layout.addWidget(dev_table)
+        
+        def select_all(checked):
+            for cb, _ in checkboxes:
+                cb.setChecked(checked)
+        btn_row = QHBoxLayout()
+        select_btn = QPushButton("전체 선택")
+        select_btn.clicked.connect(lambda: select_all(True))
+        deselect_btn = QPushButton("전체 해제")
+        deselect_btn.clicked.connect(lambda: select_all(False))
+        btn_row.addWidget(select_btn)
+        btn_row.addWidget(deselect_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+        
+        hint = QLabel("선택한 장치에만 동일한 WiFi를 전송합니다.\n저장 후 해당 장치가 자동 재부팅하며 새 WiFi로 연결됩니다. (맥·BIN 바인딩은 유지됩니다)")
         hint.setStyleSheet("color: #666; font-size: 11px;")
         layout.addWidget(hint)
         bbox = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -2305,9 +2347,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "경고", "WiFi 이름(SSID)을 입력해주세요.")
             return
         
+        selected_ids = [device_id for cb, device_id in checkboxes if cb.isChecked()]
+        if not selected_ids:
+            QMessageBox.warning(self, "경고", "대상 장치를 하나 이상 선택해주세요.")
+            return
+        
         password = pw_edit.text().strip()
         success = 0
-        for device_id in connected:
+        for device_id in selected_ids:
             if self.esp32_transport.send_set_wifi(device_id, ssid, password):
                 success += 1
                 self._add_esp32_log(f"[WiFi 일괄] {device_id} 전송 완료")
@@ -2316,9 +2363,9 @@ class MainWindow(QMainWindow):
         
         QMessageBox.information(
             self, "WiFi 일괄 설정 완료",
-            f"{success}개 장치에 WiFi 설정을 전송했습니다.\n\n"
-            f"각 ESP32가 자동으로 재부팅한 뒤 새 WiFi({ssid})로 연결됩니다.\n"
-            f"서버 IP는 재부팅 후 브로드캐스트로 자동 수신됩니다."
+            f"선택한 {success}개 장치에 WiFi 설정을 전송했습니다.\n\n"
+            f"해당 ESP32가 자동으로 재부팅한 뒤 새 WiFi({ssid})로 연결됩니다.\n"
+            f"서버 IP는 재부팅 후 브로드캐스트로 자동 수신됩니다. (맥·BIN 바인딩 유지)"
         )
     
     def _add_esp32_log(self, message: str):
@@ -2497,16 +2544,20 @@ class MainWindow(QMainWindow):
             bin_id = device.bin_id or "미할당"
             self.esp32_device_table.setItem(row, 1, QTableWidgetItem(bin_id))
             
+            # 연결 WiFi (보드별 현재 연결된 WiFi)
+            wifi_ssid = (device.wifi_ssid or "").strip() or "-"
+            self.esp32_device_table.setItem(row, 2, QTableWidgetItem(wifi_ssid))
+            
             # 상태
             status = "🟢 연결됨" if device.connected else "🔴 연결 끊김"
-            self.esp32_device_table.setItem(row, 2, QTableWidgetItem(status))
+            self.esp32_device_table.setItem(row, 3, QTableWidgetItem(status))
             
             # 연결 시간
             if device.last_seen:
                 time_str = device.last_seen.strftime("%H:%M:%S")
             else:
                 time_str = "-"
-            self.esp32_device_table.setItem(row, 3, QTableWidgetItem(time_str))
+            self.esp32_device_table.setItem(row, 4, QTableWidgetItem(time_str))
         
         # 전체피킹 탭 장치 수 동기화
         if hasattr(self, 'fp_device_count'):
@@ -2520,13 +2571,13 @@ class MainWindow(QMainWindow):
         self.esp32_transport.server_started.connect(self._on_esp32_server_started)
         self.esp32_transport.server_stopped.connect(self._on_esp32_server_stopped)
     
-    @Slot(str)
-    def _on_esp32_device_hello(self, device_id: str):
+    @Slot(str, str)
+    def _on_esp32_device_hello(self, device_id: str, wifi_ssid: str = ""):
         """ESP32 장치 연결 (ESP32 탭용) - 자동 바인딩 포함"""
-        self._add_esp32_log(f"장치 연결: {device_id}")
+        self._add_esp32_log(f"장치 연결: {device_id}" + (f" (WiFi: {wifi_ssid})" if wifi_ssid else ""))
         
-        # 장치 등록
-        self.device_registry.register_device(device_id)
+        # 장치 등록 (연결 WiFi 포함)
+        self.device_registry.register_device(device_id, wifi_ssid=wifi_ssid or None)
         
         # 자동 바인딩
         bin_id = self.device_registry.auto_bind_device(device_id)
@@ -4402,10 +4453,10 @@ class MainWindow(QMainWindow):
         self._add_fp_log("ESP32 서버 중지됨")
     
     @Slot(str)
-    def _on_fp_device_hello(self, device_id: str):
+    def _on_fp_device_hello(self, device_id: str, wifi_ssid: str = ""):
         """ESP32 장치 연결"""
-        # 장치 등록
-        self.device_registry.register_device(device_id)
+        # 장치 등록 (연결 WiFi 포함)
+        self.device_registry.register_device(device_id, wifi_ssid=wifi_ssid or None)
         
         # 자동 바인딩
         bin_id = self.device_registry.auto_bind_device(device_id)

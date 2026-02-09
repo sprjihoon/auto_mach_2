@@ -1117,11 +1117,17 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
 
 // ===== Hello 메시지 전송 =====
 void sendHello() {
-    StaticJsonDocument<200> doc;
+    StaticJsonDocument<320> doc;
     doc["type"] = "hello";
     doc["device_id"] = deviceId;
     doc["firmware_version"] = FIRMWARE_VERSION;
     doc["ip"] = WiFi.localIP().toString();
+    // 현재 연결된 WiFi SSID (PC에서 보드별 WiFi 목록 표시용)
+    if (WiFi.status() == WL_CONNECTED) {
+        doc["wifi_ssid"] = WiFi.SSID();
+    } else {
+        doc["wifi_ssid"] = "";
+    }
     
     String json;
     serializeJson(doc, json);
