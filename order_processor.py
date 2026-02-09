@@ -560,18 +560,20 @@ class OrderProcessor(QObject):
                 self.log_message.emit(f"[ESP32] BIN {bin_id}에 연결된 장치 없음")
                 continue
             
-            # 디스플레이 명령 전송
+            # 다중 SKU(공유) 빈이면 태두리 깜빡임
+            blink = self._bin_manager.is_shared_bin(bin_id)
             cmd = DisplayCommand(
                 mode="shipment",
                 bin_id=bin_id,
                 color=self.SHIPMENT_COLOR,
                 qty=qty,
-                blink=False
+                blink=blink
             )
             
             if self._esp32_transport.send_display(device_id, cmd):
                 self._active_bins.add(bin_id)
-                self.log_message.emit(f"[ESP32] {bin_id} 표시: {qty}개 (빨간색)")
+                blink_str = " (깜빡임)" if blink else ""
+                self.log_message.emit(f"[ESP32] {bin_id} 표시: {qty}개 (빨간색){blink_str}")
             else:
                 self.log_message.emit(f"[ESP32] {bin_id} 전송 실패")
     
@@ -620,16 +622,18 @@ class OrderProcessor(QObject):
             return
         
         if remaining_qty > 0:
-            # 수량 업데이트
+            # 다중 SKU(공유) 빈이면 태두리 깜빡임
+            blink = self._bin_manager.is_shared_bin(bin_id)
             cmd = DisplayCommand(
                 mode="shipment",
                 bin_id=bin_id,
                 color=self.SHIPMENT_COLOR,
                 qty=remaining_qty,
-                blink=False
+                blink=blink
             )
             self._esp32_transport.send_display(device_id, cmd)
-            self.log_message.emit(f"[ESP32] {bin_id} 업데이트: {remaining_qty}개")
+            blink_str = " (깜빡임)" if blink else ""
+            self.log_message.emit(f"[ESP32] {bin_id} 업데이트: {remaining_qty}개{blink_str}")
         else:
             # 해당 빈 끄기
             self._clear_bin_display(bin_id)
