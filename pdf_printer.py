@@ -1227,7 +1227,7 @@ def create_picking_list_pdf(df, output_path: str, sku_bin_map: dict = None, sort
         df: 주문 데이터 DataFrame
         output_path: 저장할 PDF 파일 경로
         sku_bin_map: SKU → BIN 매핑 딕셔너리
-        sort_by: 정렬 기준 - "location"(로케이션/BIN), "qty_desc"(수량 많은 순), "qty_asc"(수량 적은 순), "barcode"(바코드)
+        sort_by: 정렬 기준 - "bin"(빈 기준), "location"(로케이션 칼럼 문자열), "qty_desc", "qty_asc", "barcode"
     
     Returns:
         성공 여부
@@ -1294,75 +1294,118 @@ def create_picking_list_pdf(df, output_path: str, sku_bin_map: dict = None, sort
             else:
                 df_copy['bin'] = '-'
             
-            # 로케이션 칼럼 존재 여부 확인
+            # 로케이션 / 옵션 칼럼 존재 여부 확인
             has_location = 'location' in df_copy.columns
+            has_option = 'option_name' in df_copy.columns
             
-            # SKU별 집계 (로케이션 포함)
+            # SKU별 집계 (로케이션, 옵션 포함)
             agg_dict = {
                 'qty': 'sum',
                 'product_name': 'first'
             }
             if has_location:
                 agg_dict['location'] = 'first'
+            if has_option:
+                agg_dict['option_name'] = 'first'
             
             sku_summary = df_copy.groupby(['barcode', 'bin']).agg(agg_dict).reset_index()
             
             # 정렬 기준 적용
-            sort_by = (sort_by or "location").strip().lower()
+            sort_by = (sort_by or "bin").strip().lower()
             if sort_by == "qty_desc":
                 sku_summary = sku_summary.sort_values('qty', ascending=False).reset_index(drop=True)
             elif sort_by == "qty_asc":
                 sku_summary = sku_summary.sort_values('qty', ascending=True).reset_index(drop=True)
             elif sort_by == "barcode":
                 sku_summary = sku_summary.sort_values(['barcode', 'bin']).reset_index(drop=True)
+            elif sort_by == "location":
+                # 로케이션 칼럼 기준 문자열 정렬 (로케이션이 없으면 바코드 기준)
+                if has_location:
+                    sku_summary = sku_summary.copy()
+                    sku_summary['location'] = sku_summary['location'].fillna('').astype(str)
+                    sku_summary = sku_summary.sort_values(['location', 'barcode']).reset_index(drop=True)
+                else:
+                    sku_summary = sku_summary.sort_values(['barcode', 'bin']).reset_index(drop=True)
             else:
-                # location / bin 기준 (기본): BIN → 바코드
+                # 빈 기준: BIN → 바코드
                 sku_summary = sku_summary.sort_values(['bin', 'barcode']).reset_index(drop=True)
             
-            # 테이블 데이터 생성 (로케이션 포함 여부에 따라)
-            if has_location:
+            # 테이블 데이터 생성 (로케이션·옵션 포함 여부에 따라)
+            if has_location and has_option:
+                table_data = [['BIN', '로케이션', '바코드', '상품명', '옵션', '수량']]
+            elif has_location:
                 table_data = [['BIN', '로케이션', '바코드', '상품명', '수량']]
+            elif has_option:
+                table_data = [['BIN', '바코드', '상품명', '옵션', '수량']]
             else:
                 table_data = [['BIN', '바코드', '상품명', '수량']]
             
             for _, row in sku_summary.iterrows():
                 bin_val = str(row['bin']) if row['bin'] else '-'
                 barcode = str(row['barcode'])
-                # 상품명이 27자 초과하면 "..."으로 줄임
                 raw_name = str(row['product_name']) if row['product_name'] else '-'
                 product_name = raw_name[:27] + '...' if len(raw_name) > 27 else raw_name
                 qty = int(row['qty'])
+                opt_val = ''
+                if has_option and 'option_name' in row:
+                    raw_opt = str(row['option_name']) if pd.notna(row.get('option_name')) else ''
+                    opt_val = raw_opt if raw_opt and raw_opt != 'nan' else ''
+                    if len(opt_val) > 15:
+                        opt_val = opt_val[:15] + '...'
                 
-                if has_location:
+                if has_location and has_option:
+                    location = str(row['location']) if pd.notna(row.get('location')) else '-'
+                    table_data.append([bin_val, location, barcode, product_name, opt_val, str(qty)])
+                elif has_location:
                     location = str(row['location']) if pd.notna(row.get('location')) else '-'
                     table_data.append([bin_val, location, barcode, product_name, str(qty)])
+                elif has_option:
+                    table_data.append([bin_val, barcode, product_name, opt_val, str(qty)])
                 else:
                     table_data.append([bin_val, barcode, product_name, str(qty)])
             
             # 합계 행
             total_qty = int(sku_summary['qty'].sum())
-            if has_location:
+            if has_location and has_option:
+                table_data.append(['합계', '', '', '', f'{len(sku_summary)}종', str(total_qty)])
+            elif has_location:
+                table_data.append(['합계', '', '', f'{len(sku_summary)}종', str(total_qty)])
+            elif has_option:
                 table_data.append(['합계', '', '', f'{len(sku_summary)}종', str(total_qty)])
             else:
                 table_data.append(['합계', '', f'{len(sku_summary)}종', str(total_qty)])
             
-            # 테이블 생성 (로케이션 포함 여부에 따라 칼럼 너비 조정)
-            if has_location:
+            # 테이블 생성 (칼럼 수에 따라 너비 조정)
+            if has_location and has_option:
+                col_widths = [18*mm, 22*mm, 35*mm, 50*mm, 30*mm, 18*mm]
+                product_name_col = 3
+                option_col = 4
+            elif has_location:
                 col_widths = [20*mm, 25*mm, 40*mm, 65*mm, 20*mm]
-                product_name_col = 3  # 상품명 칼럼 인덱스
+                product_name_col = 3
+                option_col = None
+            elif has_option:
+                col_widths = [22*mm, 40*mm, 55*mm, 38*mm, 20*mm]
+                product_name_col = 2
+                option_col = 3
             else:
                 col_widths = [25*mm, 45*mm, 80*mm, 25*mm]
-                product_name_col = 2  # 상품명 칼럼 인덱스
+                product_name_col = 2
+                option_col = None
             table = Table(table_data, colWidths=col_widths)
             
             # 테이블 스타일
-            table.setStyle(TableStyle([
+            style_commands = [
                 ('FONTNAME', (0, 0), (-1, -1), font_name),
                 ('FONTSIZE', (0, 0), (-1, -1), 9),
                 ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
                 ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('ALIGN', (product_name_col, 1), (product_name_col, -1), 'LEFT'),  # 상품명은 왼쪽 정렬
+                ('ALIGN', (product_name_col, 1), (product_name_col, -1), 'LEFT'),
+            ]
+            if option_col is not None:
+                style_commands.append(('ALIGN', (option_col, 1), (option_col, -1), 'LEFT'))
+            style_commands.extend([
                 ('FONTSIZE', (0, 0), (-1, 0), 10),
                 ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
                 ('BACKGROUND', (0, -1), (-1, -1), colors.lightgrey),
@@ -1371,7 +1414,8 @@ def create_picking_list_pdf(df, output_path: str, sku_bin_map: dict = None, sort
                 ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
                 ('TOPPADDING', (0, 0), (-1, -1), 4),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-            ]))
+            ])
+            table.setStyle(TableStyle(style_commands))
             
             elements.append(table)
         

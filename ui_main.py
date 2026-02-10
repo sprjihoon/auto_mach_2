@@ -2585,6 +2585,8 @@ class MainWindow(QMainWindow):
             # 바인딩 명령 전송 (ESP32에 BIN 번호 알림)
             self.esp32_transport.send_bind(device_id, bin_id)
             self._add_esp32_log(f"자동 바인딩: {device_id} → {bin_id}")
+            # 현재 탭의 활성 작업이 있으면 LCD display 재전송 (스탠바이만 보이는 문제 방지)
+            QTimer.singleShot(600, lambda: self._refresh_lcd_display_for_bin(device_id, bin_id))
         else:
             self._add_esp32_log(f"[경고] 자동 바인딩 실패: {device_id}")
         
@@ -2915,7 +2917,8 @@ class MainWindow(QMainWindow):
         sort_row = QHBoxLayout()
         sort_row.addWidget(QLabel("📑 PDF 정렬 기준:"))
         self.settings_pdf_sort_combo = QComboBox()
-        self.settings_pdf_sort_combo.addItem("로케이션(BIN) 기준", "location")
+        self.settings_pdf_sort_combo.addItem("빈 기준", "bin")
+        self.settings_pdf_sort_combo.addItem("로케이션 기준", "location")
         self.settings_pdf_sort_combo.addItem("수량 많은 순", "qty_desc")
         self.settings_pdf_sort_combo.addItem("수량 적은 순", "qty_asc")
         self.settings_pdf_sort_combo.addItem("바코드 기준", "barcode")
@@ -3484,7 +3487,7 @@ class MainWindow(QMainWindow):
             from utils import safe_save_file
             
             # 정렬 기준 (콤보에서 선택한 값)
-            sort_by = self.settings_pdf_sort_combo.currentData() or "location"
+            sort_by = self.settings_pdf_sort_combo.currentData() or "bin"
             
             # Permission 오류 시 자동으로 다른 이름으로 재시도
             def save_pdf(path):
@@ -6425,6 +6428,42 @@ class MainWindow(QMainWindow):
         # 재출력 탭 (인덱스 3)
         elif index == 3:
             QTimer.singleShot(100, lambda: self.reprint_input.setFocus())
+    
+    def _refresh_lcd_display_for_bin(self, device_id: str, bin_id: str):
+        """장치 연결/재연결 시 현재 탭 기준으로 해당 BIN의 LCD display 재전송 (스탠바이만 계속되는 문제 방지)"""
+        if not self.esp32_transport.is_running:
+            return
+        
+        tab = self.tab_widget.currentIndex()
+        # 출고 탭(0): 활성 송장이 있으면 해당 빈 포함 전체 재전송
+        if tab == 0:
+            if getattr(self.processor, 'current_tracking_no', None) and getattr(self.processor, '_active_bins', None):
+                self.processor._send_remaining_bins_display(self.processor.current_tracking_no)
+        # 전체피킹 탭(1): 활성 세션에 해당 빈이 있으면 display 전송
+        elif tab == 1:
+            if self.full_pick_engine.current_session and bin_id in self.full_pick_engine.current_session.bins:
+                task = self.full_pick_engine.current_session.bins[bin_id]
+                if not task.done:
+                    from esp32_transport import DisplayCommand
+                    cmd = DisplayCommand(
+                        mode="full_pick",
+                        bin_id=bin_id,
+                        color=self.full_pick_engine.FULL_PICK_COLOR,
+                        qty=task.qty,
+                        blink=False
+                    )
+                    if self.esp32_transport.send_display(device_id, cmd):
+                        self._add_esp32_log(f"[재연결] {bin_id} 전체피킹 LCD 표시")
+        # 미리피킹 탭(2): 해당 빈이 들어 있는 슬롯이 있으면 display 전송
+        elif tab == 2:
+            for slot_id in range(1, self.pre_pick_engine.slot_manager.active_slot_count + 1):
+                slot = self.pre_pick_engine.slot_manager.get_slot(slot_id)
+                if slot and slot.state != SlotState.EMPTY and bin_id in slot.bins:
+                    task = slot.bins[bin_id]
+                    if self.pre_pick_engine._bin_queue.is_bin_active_for_slot(bin_id, slot_id):
+                        self.pre_pick_engine._send_lcd_display(slot_id, bin_id, task.qty)
+                        self._add_esp32_log(f"[재연결] {bin_id} 미리피킹 LCD 표시")
+                    break
     
     def _handle_esp32_mode_switch(self, tab_index: int):
         """탭 전환 시 ESP32 모드 전환 처리"""
