@@ -1219,7 +1219,7 @@ def print_pdf_simple(tracking_no: str, labels_dir: str = "labels") -> bool:
         return False
 
 
-def create_picking_list_pdf(df, output_path: str, sku_bin_map: dict = None) -> bool:
+def create_picking_list_pdf(df, output_path: str, sku_bin_map: dict = None, sort_by: str = "location") -> bool:
     """
     피킹리스트 PDF 생성
     
@@ -1227,6 +1227,7 @@ def create_picking_list_pdf(df, output_path: str, sku_bin_map: dict = None) -> b
         df: 주문 데이터 DataFrame
         output_path: 저장할 PDF 파일 경로
         sku_bin_map: SKU → BIN 매핑 딕셔너리
+        sort_by: 정렬 기준 - "location"(로케이션/BIN), "qty_desc"(수량 많은 순), "qty_asc"(수량 적은 순), "barcode"(바코드)
     
     Returns:
         성공 여부
@@ -1306,8 +1307,17 @@ def create_picking_list_pdf(df, output_path: str, sku_bin_map: dict = None) -> b
             
             sku_summary = df_copy.groupby(['barcode', 'bin']).agg(agg_dict).reset_index()
             
-            # BIN 순서로 정렬
-            sku_summary = sku_summary.sort_values(['bin', 'barcode'])
+            # 정렬 기준 적용
+            sort_by = (sort_by or "location").strip().lower()
+            if sort_by == "qty_desc":
+                sku_summary = sku_summary.sort_values('qty', ascending=False).reset_index(drop=True)
+            elif sort_by == "qty_asc":
+                sku_summary = sku_summary.sort_values('qty', ascending=True).reset_index(drop=True)
+            elif sort_by == "barcode":
+                sku_summary = sku_summary.sort_values(['barcode', 'bin']).reset_index(drop=True)
+            else:
+                # location / bin 기준 (기본): BIN → 바코드
+                sku_summary = sku_summary.sort_values(['bin', 'barcode']).reset_index(drop=True)
             
             # 테이블 데이터 생성 (로케이션 포함 여부에 따라)
             if has_location:

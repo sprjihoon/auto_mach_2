@@ -21,10 +21,10 @@
 | WS2812B NeoPixel | 색상 LED (선택사항, GPIO27) |
 
 ### CYD 보드 내장 기능
-- 2.8인치 TFT 320x240 (ILI9341)
+- 2.8인치 TFT 320x240 (ILI9341 또는 ST7789, User_Setup.h에 따라 다름)
 - RGB LED (GPIO 4, 16, 17)
 - BOOT 버튼 (GPIO 0)
-- 터치스크린 (미사용)
+- 터치스크린 (XPT2046, 펌웨어에서 사용)
 
 ## WiFi 설정 모드 (핵심 기능!)
 
@@ -72,6 +72,53 @@ BOOT 버튼 누른 상태로 USB 연결
         ↓
 6. ESP32 자동 재부팅 → 새 WiFi로 연결
 ```
+
+## 펌웨어/환경이 오래됐을 때 (업데이트 방법)
+
+아두이노 펌웨어가 옛날 것 같거나 컴파일/동작 오류가 나면 아래 순서로 환경을 갱신하세요.
+
+### 1. ESP32 보드 패키지 갱신
+
+1. **파일** → **기본설정** → **추가 보드 관리자 URL**에 아래가 있는지 확인 (없으면 추가):
+   ```
+   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+   ```
+   (또는 Espressif 공식: `https://espressif.github.io/arduino-esp32/package_esp32_index.json`)
+
+2. **도구** → **보드** → **보드 관리자**에서 `esp32` 검색 → **업데이트** 또는 **설치** (최신 2.x / 3.x 권장)
+
+3. **도구** → **보드**에서 `ESP32 Dev Module` 선택, **Flash Size: 4MB**, **Partition: Default 4MB with spiffs**
+
+### 2. 라이브러리 갱신
+
+**스케치** → **라이브러리 포함** → **라이브러리 관리**에서 아래 라이브러리를 검색한 뒤 **업데이트** 또는 설치:
+
+| 라이브러리 | 검색어 | 제작자 | 비고 |
+|-----------|--------|--------|------|
+| TFT_eSPI | TFT_eSPI | Bodmer | 업데이트 후 **User_Setup.h 다시 복사** (아래 3번) |
+| ArduinoJson | ArduinoJson | Benoit Blanchon | 6.x 또는 7.x |
+| WebSockets | WebSockets | Markus Sattler | 2.x |
+| Adafruit NeoPixel | Adafruit NeoPixel | Adafruit | 1.x |
+
+업데이트 후 컴파일 오류가 나면:  
+- ArduinoJson 7.x 사용 시 `StaticJsonDocument` 등 API가 동일한지 확인  
+- TFT_eSPI는 이 폴더의 `User_Setup.h`를 라이브러리 폴더에 다시 덮어쓰기
+
+### 3. TFT_eSPI User_Setup.h 다시 복사
+
+보드/라이브러리 업데이트 후에는 TFT 설정이 초기화될 수 있으므로:
+
+1. 이 폴더(`esp32_firmware`)의 `User_Setup.h` 복사
+2. `Arduino/libraries/TFT_eSPI/User_Setup.h` 위치에 **덮어쓰기**
+3. Arduino IDE 재시작 후 다시 업로드
+
+### 4. 그래도 안 되면
+
+- **도구** → **보드** → **ESP32 Dev Module** 선택 후 **보드 정보**에서 "2.0.x" 이상인지 확인
+- 시리얼 모니터(115200)로 부팅 로그 확인
+- CH340/CP2102 등 USB 드라이버 재설치
+
+---
 
 ## Arduino IDE 설정
 

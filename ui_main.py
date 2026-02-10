@@ -2911,6 +2911,18 @@ class MainWindow(QMainWindow):
         picking_session_row.addWidget(self.settings_refresh_picking_combo_btn)
         path_layout.addLayout(picking_session_row)
         
+        # 피킹리스트 PDF 정렬 기준
+        sort_row = QHBoxLayout()
+        sort_row.addWidget(QLabel("📑 PDF 정렬 기준:"))
+        self.settings_pdf_sort_combo = QComboBox()
+        self.settings_pdf_sort_combo.addItem("로케이션(BIN) 기준", "location")
+        self.settings_pdf_sort_combo.addItem("수량 많은 순", "qty_desc")
+        self.settings_pdf_sort_combo.addItem("수량 적은 순", "qty_asc")
+        self.settings_pdf_sort_combo.addItem("바코드 기준", "barcode")
+        self.settings_pdf_sort_combo.setToolTip("피킹리스트 PDF 저장 시 적용할 정렬 기준")
+        sort_row.addWidget(self.settings_pdf_sort_combo, 1)
+        path_layout.addLayout(sort_row)
+        
         # 피킹리스트 관련 버튼
         picking_row = QHBoxLayout()
         self.settings_save_excel_btn = QPushButton("📊 엑셀 저장")
@@ -3471,9 +3483,12 @@ class MainWindow(QMainWindow):
             from pdf_printer import create_picking_list_pdf
             from utils import safe_save_file
             
+            # 정렬 기준 (콤보에서 선택한 값)
+            sort_by = self.settings_pdf_sort_combo.currentData() or "location"
+            
             # Permission 오류 시 자동으로 다른 이름으로 재시도
             def save_pdf(path):
-                if not create_picking_list_pdf(filtered_df, path, sku_bin_map):
+                if not create_picking_list_pdf(filtered_df, path, sku_bin_map, sort_by=sort_by):
                     raise Exception("PDF 생성 실패")
                 return True
             

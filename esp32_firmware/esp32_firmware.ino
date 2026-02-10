@@ -20,10 +20,11 @@
  * - 설정 저장 후 자동 재부팅
  * 
  * 라이브러리 필요:
- * - TFT_eSPI (설정 필요)
- * - ArduinoJson
- * - WebSockets by Markus Sattler
- * - Adafruit NeoPixel
+ * - TFT_eSPI (설정 필요, User_Setup.h 복사 필수)
+ * - ArduinoJson 6.x / 7.x
+ * - WebSockets by Markus Sattler 2.x
+ * - Adafruit NeoPixel 1.x
+ * 환경 업데이트: README.md "펌웨어/환경이 오래됐을 때" 참고.
  */
 
 #include <WiFi.h>
