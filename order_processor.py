@@ -81,6 +81,7 @@ class OrderProcessor(QObject):
     log_message = Signal(str)  # 로그 메시지
     scanner_pause = Signal()  # 스캐너 일시 중지
     scanner_resume = Signal()  # 스캐너 재개
+    ezauto_done = Signal()  # EzAuto 입력 완료 (백그라운드 스레드에서 emit → 메인에서 이어서 처리)
     
     def __init__(
         self,
@@ -117,6 +118,10 @@ class OrderProcessor(QObject):
         
         # 출고 모드 전용 색상
         self.SHIPMENT_COLOR = "red"
+        
+        # ★ EzAuto 백그라운드 처리 후 이어할 상태 (중복/UI 멈춤 방지)
+        self._pending_after_ezauto: Optional[Tuple[str, str, float, bool]] = None  # (tracking_no, barcode, timestamp, is_new_tracking)
+        self.ezauto_done.connect(self._continue_after_ezauto)
     
     @property
     def current_tracking_no(self) -> Optional[str]:
@@ -269,39 +274,60 @@ class OrderProcessor(QObject):
             self.log_message.emit(f"[오류] {event.message}")
             return event
         
-        # 5. EzAuto 입력 전송 (같은 송장이면 바코드만)
+        # 5. EzAuto 입력 전송 (백그라운드 스레드에서 실행 → UI 멈춤 방지)
         is_new_tracking = (self._current_tracking_no != tracking_no)
         
         # 처리 시작
         self._is_processing = True
         
-        # 스캐너 일시 중지 (EzAuto 입력 중 키 입력 방지)
+        # 스캐너 일시 중지 (EzAuto 입력 중 키 입력 방지) - UI에서 이미 pause 했을 수 있음
         self.scanner_pause.emit()
         
+        # EzAuto 완료 후 이어할 상태 저장
+        self._pending_after_ezauto = (tracking_no, barcode, timestamp, is_new_tracking)
         if is_new_tracking:
-            # 새 송장: 송장번호 + 바코드 입력
             self._current_tracking_no = tracking_no
-            self.ezauto.send_input(tracking_no, barcode)
+        
+        if is_new_tracking:
             self.log_message.emit(f"[EzAuto] 송장번호 + 바코드 입력: {tracking_no} / {barcode}")
-            
-            # ★ ESP32: 새 송장 로드 시 남은 제품들의 빈 표시
-            self._send_remaining_bins_display(tracking_no, exclude_barcode=barcode)
         else:
-            # 같은 송장: 바코드만 입력
-            self.ezauto.send_barcode_only(barcode)
             self.log_message.emit(f"[EzAuto] 바코드만 입력: {barcode}")
-            
-            # ★ ESP32: 스캔 후 빈 표시 업데이트
-            self._update_bin_display_after_scan(tracking_no, barcode)
+        
+        def _run_ezauto():
+            try:
+                if is_new_tracking:
+                    self.ezauto.send_input(tracking_no, barcode)
+                else:
+                    self.ezauto.send_barcode_only(barcode)
+            finally:
+                self.ezauto_done.emit()
+        
+        t = threading.Thread(target=_run_ezauto, daemon=True)
+        t.start()
+        return None  # 나머지는 _continue_after_ezauto에서 처리
+    
+    def _continue_after_ezauto(self):
+        """EzAuto 입력 완료 후 메인 스레드에서 실행 (UI 멈춤 없이 이어서 처리)"""
+        import time as time_mod
+        
+        pending = self._pending_after_ezauto
+        self._pending_after_ezauto = None
+        if not pending:
+            self._is_processing = False
+            return
+        tracking_no, barcode, timestamp, is_new_tracking = pending
         
         # ★ 스캐너 재개 전 대기 (EzAuto 입력 완료 + 포커스 복귀 안정화)
-        import time as time_mod
-        time_mod.sleep(0.8)  # 0.5 → 0.8초로 늘림
-        
-        # 스캐너 재개
+        time_mod.sleep(0.8)
         self.log_message.emit("[디버그] 스캐너 재개 준비...")
         self.scanner_resume.emit()
         self.log_message.emit("[디버그] 스캐너 재개 완료 (0.3초 쿨다운 시작)")
+        
+        # ★ ESP32: EzAuto 입력 후 빈 표시 (메인 스레드에서 호출)
+        if is_new_tracking:
+            self._send_remaining_bins_display(tracking_no, exclude_barcode=barcode)
+        else:
+            self._update_bin_display_after_scan(tracking_no, barcode)
         
         # 7. 남은 수량 계산
         remaining = self.excel.get_group_remaining(tracking_no)
@@ -315,58 +341,35 @@ class OrderProcessor(QObject):
             self.log_message.emit(f"[완료] 송장 {tracking_no} 구성 완료!")
             
             # ★ 중복 출력 방지 (3단계 체크)
-            # 1단계: 이미 출력 완료된 송장인지 확인 (세션 내 추적)
             if tracking_no in self._printed_tracking_nos:
                 self.log_message.emit(f"⚠️ [중복 방지] 송장 {tracking_no}은(는) 이 세션에서 이미 출력됨 → 출력 건너뛰기")
-            # 2단계: 엑셀에서 used=1인지 확인
             elif self.excel.is_tracking_used(tracking_no):
                 self.log_message.emit(f"⚠️ [중복 방지] 송장 {tracking_no}은(는) 이미 처리 완료됨 → 출력 건너뛰기")
-            # 3단계: 현재 출력 진행 중인지 확인
             elif tracking_no in self._printing_tracking:
                 self.log_message.emit(f"⚠️ [중복 방지] 송장 {tracking_no} 출력 진행 중 → 건너뛰기")
             else:
-                # 출력 시작 전 플래그 설정
                 self._printing_tracking.add(tracking_no)
-                
-                # PDF 출력 전 상태 체크
                 pdf_index_count = len(self.pdf._tracking_index) if hasattr(self.pdf, '_tracking_index') else 0
                 if pdf_index_count == 0:
                     self.log_message.emit(f"⚠️ [경고] PDF 인덱스가 비어있습니다! PDF 파일을 먼저 로드하세요.")
                     self.log_message.emit(f"   → '데이터 업로드'에서 송장 라벨 PDF 파일을 선택하세요.")
-                
-                # PDF 출력 (스캔 완료 후)
                 self.log_message.emit(f"[출력] 송장 {tracking_no} PDF 출력 시작 (인덱스: {pdf_index_count}개)")
                 if self.pdf.print_pdf(tracking_no):
                     self.log_message.emit(f"[성공] PDF 출력 완료: {tracking_no}")
-                    # ★ 출력 완료 후 영구 추적 목록에 추가
                     self._printed_tracking_nos.add(tracking_no)
                 else:
                     self.log_message.emit(f"[오류] PDF 출력 실패: {tracking_no}")
                     self.log_message.emit(f"   → PDF 파일이 설정되어 있는지 확인하세요.")
-                    self.log_message.emit(f"   → 라벨 프린터가 설정되어 있는지 확인하세요.")
-                
-                # 출력 완료 후 진행 중 플래그 제거
                 self._printing_tracking.discard(tracking_no)
             
-            # ★ ESP32: 송장 완료 시 모든 빈 표시 끄기
             self._clear_all_bin_displays()
-            
-            # 완료 신호음 🎵
             play_complete_sound()
-            
-            # used = 1 설정
             self.excel.mark_used(tracking_no)
             self.log_message.emit(f"[완료] 송장 {tracking_no} 처리 완료 (used=1)")
-            
-            # 스캐너 일시 중지 (다음 송장 자동 시작 방지)
             self.scanner_pause.emit()
-            
-            # 완료 시그널
             self.tracking_completed.emit(tracking_no)
             self._current_tracking_no = None
             
-            # ★ 1.2초 대기 후 스캐너 재개 (송장 완료 후 충분한 대기)
-            import time as time_mod
             time_mod.sleep(1.2)
             self.log_message.emit("[디버그] 송장 완료 후 스캐너 재개 준비...")
             self.scanner_resume.emit()
@@ -380,9 +383,7 @@ class OrderProcessor(QObject):
                 message=f"송장 {tracking_no} 구성 완료!"
             )
         else:
-            # 스캔 성공 신호음 🔔
             play_scan_sound()
-            
             event = ScanEvent(
                 timestamp=timestamp,
                 barcode=barcode,
@@ -391,12 +392,9 @@ class OrderProcessor(QObject):
                 message=f"스캔 성공 (남은 수량: {remaining})"
             )
         
-        # 처리 완료
         self._is_processing = False
-        
         self.scan_processed.emit(event)
         self.log_message.emit(f"[정보] {event.message}")
-        return event
     
     def get_current_tracking_items(self) -> pd.DataFrame:
         """현재 작업 중인 tracking_no의 항목들 반환"""

@@ -8091,6 +8091,11 @@ class MainWindow(QMainWindow):
             if not self.processor.current_tracking_no:
                 self._preview_tracking_info(tracking_no, barcode)
         
+        # ★ 중복 입력 방지: 스캐너 즉시 일시정지 + 스캔 입력창 비우기 (마지막 바코드가 한 번 더 입력되는 현상 방지)
+        self.scanner.pause()
+        if hasattr(self, 'manual_barcode_edit'):
+            self.manual_barcode_edit.clear()
+        
         self.processor.process_scan(barcode)
     
     def _preview_tracking_info(self, tracking_no: str, barcode: str):

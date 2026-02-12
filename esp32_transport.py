@@ -183,14 +183,16 @@ class Esp32Transport(QObject):
     
     async def _start_server(self):
         """비동기 서버 시작"""
+        # backlog: 대기 중인 연결 큐 크기 (기본값은 OS별로 작을 수 있음). 13대 이상 연결 시 backlog 부족으로 거절될 수 있어 128로 설정.
         self._server = await serve(
             self._handle_connection,
             self._host,
             self._port,
             ping_interval=30,
-            ping_timeout=10
+            ping_timeout=10,
+            backlog=128,
         )
-        print(f"[ESP32Transport] WebSocket 서버 시작: ws://{self._host}:{self._port}")
+        print(f"[ESP32Transport] WebSocket 서버 시작: ws://{self._host}:{self._port} (backlog=128)")
     
     async def _handle_connection(self, websocket, path=None):
         """클라이언트 연결 처리"""
