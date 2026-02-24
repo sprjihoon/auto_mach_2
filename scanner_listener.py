@@ -29,7 +29,12 @@ class ScannerListener(QObject):
     status_changed = Signal(str)
     
     # 스캐너 입력 속도 임계값 (ms) - 이보다 느리면 사람 타이핑으로 간주
-    SCAN_SPEED_THRESHOLD = 50  # 50ms
+    # ※ 50ms는 일부 스캐너에서 1~2번째 키 간격이 더 길어 앞글자가 잘림 → 120ms로 완화
+    SCAN_SPEED_THRESHOLD = 120  # 120ms
+    # 스캔 시작 직후 허용 시간 (ms) - 첫 글자 다음 키는 이 안이면 무조건 이어붙임 (앞글자 누락 방지)
+    SCAN_START_GRACE_MS = 250
+    # 이 길이 미만이면 시간 간격과 관계없이 항상 이어붙임 (앞글자 누락 완전 방지)
+    SCAN_HEAD_PROTECT_LEN = 10
     # 최소 바코드 길이
     MIN_BARCODE_LENGTH = 4
     
@@ -178,7 +183,6 @@ class ScannerListener(QObject):
                         
                         self._last_emitted_barcode = barcode
                         self._last_emit_time = now
-                        
                         # 시그널 발생 (메인 스레드에서 처리됨)
                         self.barcode_scanned.emit(barcode)
             
@@ -200,11 +204,14 @@ class ScannerListener(QObject):
                     # 첫 글자: 버퍼 시작
                     self._buffer = key_name
                     self._is_fast_input = True
+                elif len(self._buffer) < self.SCAN_HEAD_PROTECT_LEN:
+                    # 앞 10글자 미만: 시간 간격 무관 항상 이어붙임 (스캔 앞부분 누락 완전 방지)
+                    self._buffer += key_name
                 elif time_diff <= self.SCAN_SPEED_THRESHOLD:
                     # 빠른 입력: 스캐너로 간주하고 버퍼에 추가
                     self._buffer += key_name
                 else:
-                    # 느린 입력: 사람 타이핑으로 간주하고 버퍼 초기화 후 새로 시작
+                    # 버퍼 이미 10글자 이상 + 느린 입력 → 사람 타이핑으로 간주, 버퍼 교체
                     self._buffer = key_name
                     self._is_fast_input = False
             
