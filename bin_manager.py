@@ -167,7 +167,7 @@ class BinManager(QObject):
         DataFrame에서 SKU별 BIN 자동 배정 (개선된 알고리즘)
         
         0) 단일품목 1개 공유빈: 해당 SKU가 나오는 모든 주문이 "한 건 한 줄 수량 1"인 SKU만
-           → BIN-01에 고정 배정 (초과 시 BIN-02, BIN-03...)
+           → BIN-01에 고정 배정 (빈당 최대 수량 등 빈 설정 적용 안 함)
         1) 전용 BIN (dedicated_qty_threshold 이상) → 각각 독립 BIN
         2) 대량 SKU (수량 > min_qty_threshold) → 각각 독립 BIN, 필요시 분산
         3) 소량 SKU (수량 <= min_qty_threshold) → 공유 BIN에 묶음
@@ -235,22 +235,16 @@ class BinManager(QObject):
                 large_skus.append((barcode, qty))
             else:
                 small_skus.append((barcode, qty))
-        # 0. 단일품목 1개 공유빈: BIN-01 고정, 초과 시 BIN-02, BIN-03...
+        # 0. 단일품목 1개 공유빈: BIN-01 고정 (빈당 최대 수량 등 빈 설정 적용 안 함, 전부 BIN-01에만)
         if single_item_skus:
             self._bin_counter = 1
             self._bin_sku_map[self.SINGLE_ITEM_SHARED_BIN_ID] = []
             self._bin_qty_map[self.SINGLE_ITEM_SHARED_BIN_ID] = 0
-            current_bin_id = self.SINGLE_ITEM_SHARED_BIN_ID
-            current_bin_qty = 0
             for barcode, qty in single_item_skus:
-                if current_bin_qty + qty > self._max_qty_per_bin and current_bin_qty > 0:
-                    current_bin_id = self._create_new_bin()
-                    current_bin_qty = 0
-                self._bin_sku_map[current_bin_id].append(barcode)
-                self._bin_qty_map[current_bin_id] += qty
-                current_bin_qty += qty
-                self._sku_bin_map[barcode] = current_bin_id
-                self._sku_bin_list[barcode] = [current_bin_id]
+                self._bin_sku_map[self.SINGLE_ITEM_SHARED_BIN_ID].append(barcode)
+                self._bin_qty_map[self.SINGLE_ITEM_SHARED_BIN_ID] += qty
+                self._sku_bin_map[barcode] = self.SINGLE_ITEM_SHARED_BIN_ID
+                self._sku_bin_list[barcode] = [self.SINGLE_ITEM_SHARED_BIN_ID]
         # 1. 전용 BIN 강제 SKU 처리 (중복금지 룰 - 수량 기준)
         for barcode, qty in dedicated_skus:
             bins_for_sku = []
